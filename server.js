@@ -1,74 +1,65 @@
-@ -1,18 +1,61 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-import {
-  Application,
-  Router,
-  send,
-} from "https://deno.land/x/oak@v12.6.1/mod.ts";
-import { cors } from "https://deno.land/x/cors@v1.2.2/mod.ts";
+const axios = require('axios');
+const fetch = require('node-fetch'); // For fetching alerts from external APIs
 
+// Create the Express app instance
 const app = express();
-const app = new Application();
-const router = new Router();
 
-app.use(cors()); // This will enable CORS for all routes
+// Enable Cross-Origin Resource Sharing (CORS) for frontend access
 app.use(cors());
 
-// Serve static files from the 'WarningFeeder' directory
+// Serve static files (like index.html, CSS, JS, etc.)
 app.use(express.static(path.join(__dirname)));
-// Serve static files (assuming your files are in the current directory)
-app.use(async (context, next) => {
-  if (context.request.url.pathname.startsWith("/api")) {
-    await next();
+
+// Proxy endpoint for fetching alerts from the XMPP API
+app.get('/api/xmpp-alerts', async (req, res) => {
+  if (req.method === 'GET') {
+    try {
+      // Fetch the latest alerts from the XMPP API
+      const response = await axios.get('https://xmpp-api.onrender.com/all-alerts');
+      
+      // If successful, send the alerts data as a JSON response
+      res.status(200).json(response.data);
+    } catch (error) {
+      console.error('Error fetching from XMPP API:', error);
+      
+      // If an error occurs, send a 500 error with an appropriate message
+      res.status(500).json({ error: 'Failed to fetch data from XMPP API' });
+    }
   } else {
-    await send(context, context.request.url.pathname, {
-      root: Deno.cwd(),
-      index: "index.html",
-    });
+    // If the method is not GET, return a 405 Method Not Allowed error
+    res.setHeader('Allow', ['GET']);
+    res.status(405).end(`Method ${req.method} Not Allowed`);
   }
 });
 
-router.get("/api/xmpp-alerts", async (context) => {
+// Endpoint for fetching warnings from the weather.gov API
+app.get('/api/fetch-warnings', async (req, res) => {
   try {
-    const response = await fetch("https://xmpp-api.onrender.com/all-alerts");
+    const response = await fetch('https://api.weather.gov/alerts/active?area=MI');
     const data = await response.json();
-    context.response.status = 200;
-    context.response.body = data;
+    
+    // Filter the warnings as needed (just an example)
+    const warnings = data.features.filter(feature =>
+      feature.properties.event === "Tornado Warning"
+    );
+
+    res.status(200).json(warnings);  // Send filtered warnings as JSON response
   } catch (error) {
-    console.error("Error fetching from XMPP API:", error);
-    context.response.status = 500;
-    context.response.body = { error: "Failed to fetch data from XMPP API" };
+    console.error('Error fetching weather warnings:', error);
+    res.status(500).json({ error: 'Failed to fetch warnings' });
   }
 });
 
-// Route to serve index.html
+// Serve the main page (index.html)
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-router.get("/api/fetch-warnings", async (context) => {
-  try {
-    const response = await fetch(
-      "https://api.weather.gov/alerts/active?area=MI"
-    );
-    const data = await response.json();
-    const warnings = data.features.filter(
-      (feature) => feature.properties.event === "Tornado Warning"
-    );
-    context.response.status = 200;
-    context.response.body = warnings;
-  } catch (error) {
-    console.error("Error fetching weather warnings:", error);
-    context.response.status = 500;
-    context.response.body = { error: "Failed to fetch warnings" };
-  }
+  res.sendFile(path.join(__dirname, 'index.html'));
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
-app.use(router.routes());
-app.use(router.allowedMethods());
-
-const PORT = Number(Deno.env.get("PORT")) || 3100;
-console.log(`Server running on http://localhost:${PORT}`);
-await app.listen({ port: PORT });
+// Define the port and start the server
+const PORT = process.env.PORT || 3100;
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
