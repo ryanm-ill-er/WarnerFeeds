@@ -13,7 +13,7 @@ app.use(express.static(path.join(__dirname)));
 app.get('/api/xmpp-alerts', async (req, res) => {
   if (req.method === 'GET') {
     try {
-      const response = await axios.get('https://xmpp-api.onrender.com/all-alerts');
+      const response = await axios.get('https://xmpp-api-production.up.railway.app/all-alerts');
       res.status(200).json(response.data);
     } catch (error) {
       console.error('Error fetching from XMPP API:', error);
