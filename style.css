@@ -325,13 +325,13 @@ body.overlay {
 
 .logo-container {
   position: fixed;
-  bottom: -80px;
-  left: -80px;
+  bottom: -60px;
+  left: -20px;
   z-index: 1020;
 }
 
 .logo {
-    width: 550px; /* Adjust size as needed */
+    width: 420px; /* Adjust size as needed */
     height: auto;
     transform-origin: center;
 }
@@ -612,11 +612,10 @@ body {
   right: 0;
   width: 764px;
   height: 90px;
-  background: radial-gradient(
-    circle at left center,
-    rgba(0, 0, 0, 1) 0%,
-    rgba(0, 0, 0, 0.8) 30%,
-    rgba(0, 0, 0, 0) 100%
+  background: linear-gradient(
+    to right,
+    rgba(100, 100, 100, 0.7) 0%,
+    rgba(50, 50, 50, 0) 100%
   );
   border-top-left-radius: 764px;
   border-bottom-left-radius: 764px;
@@ -627,6 +626,7 @@ body {
   box-sizing: border-box;
   z-index: 1030;
 }
+
 
 .time-date {
   display: flex;

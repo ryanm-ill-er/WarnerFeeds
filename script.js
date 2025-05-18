@@ -762,7 +762,7 @@ function typeEffect(element, text, delay = 25, startDelay = 150) {
 }
 function getHighestActiveAlert() {
   if (!activeWarnings || activeWarnings.length === 0) {
-    return { alert: "N/A", color: "#1F2593" };
+    return { alert: "N/A", color: "#606060" };
   }
 
   const sortedWarnings = [...activeWarnings].sort((a, b) => {
@@ -836,14 +836,15 @@ function updateAlertBar() {
   const alertBar = document.getElementById("alertBar");
   const alertText = document.getElementById("highestAlertText");
   const activeAlertsBox = document.querySelector(".active-alerts-box");
-
+  const semicircle = document.querySelector(".semicircle");
+  
   const currentText =
     highestAlert.alert === "N/A"
-      ? "MICHIGAN STORM CHASERS"
+      ? "INDIANA WEATHER NETWORK"
       : highestAlert.originalAlert
       ? getEventName(highestAlert.originalAlert)
       : highestAlert.alert;
-  const currentColor = highestAlert.color || "#1F2593";
+  const currentColor = highestAlert.color || "#000000";
   const currentCount = activeWarnings.length;
 
   if (
@@ -858,19 +859,25 @@ function updateAlertBar() {
   lastWarningsCount = currentCount;
 
   if (highestAlert.alert === "N/A" && activeWarnings.length === 0) {
-    alertText.textContent = "MICHIGAN STORM CHASERS";
-    alertBar.style.backgroundColor = "#1F2593";
+    alertText.textContent = "INDIANA WEATHER NETWORK";
+    alertBar.style.backgroundColor = "#000000";
     activeAlertsBox.style.display = "none";
+    // Normal subtle gradient for inactive state
+    semicircle.style.background = "linear-gradient(to right, rgba(100, 100, 100, 0.7) 0%, rgba(50, 50, 50, 0) 100%)";
   } else if (highestAlert.alert) {
     alertText.textContent = currentText;
     alertBar.style.backgroundColor = highestAlert.color;
     alertBar.style.setProperty("--glow-color", highestAlert.color);
     activeAlertsBox.textContent = "HIGHEST ACTIVE ALERT";
     activeAlertsBox.style.display = "block";
+    // Black gradient for active alert state
+    semicircle.style.background = "linear-gradient(to right, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 100%)";
   } else {
     alertText.textContent = "No valid alert found.";
-    alertBar.style.backgroundColor = "#1F2593";
+    alertBar.style.backgroundColor = "#606060";
     activeAlertsBox.style.display = "none";
+    // Normal subtle gradient for inactive state
+    semicircle.style.background = "linear-gradient(to right, rgba(100, 100, 100, 0.7) 0%, rgba(50, 50, 50, 0) 100%)";
   }
 }
 
@@ -2253,28 +2260,24 @@ async function tacticalMode(ignoreSameFilter = false) {
 let currentCityIndex = 0;
 
 const CITY_STATIONS = [
-  { city: "Detroit", station: "KDTW" },
-  { city: "Lansing", station: "KLAN" },
-  { city: "Grand Rapids", station: "KGRR" },
-  { city: "Kalamazoo", station: "KAZO" },
-  { city: "Hillsdale", station: "KJYM" },
-  { city: "Flint", station: "KFNT" },
-  { city: "Bad Axe", station: "KBAX" },
-  { city: "Mount Pleasant", station: "KMOP" },
-  { city: "Ludington", station: "KLDM" },
-  { city: "Cadillac", station: "KCAD" },
-  { city: "Gaylord", station: "KGLR" },
-  { city: "Houghton", station: "KCMX" },
-  { city: "Marquette", station: "KSAW" },
-  { city: "Sault Ste. Marie", station: "KANJ" },
+  { city: "Indianapolis", station: "KIND" },
+  { city: "Fort Wayne", station: "KFWA" },
+  { city: "South Bend", station: "KSBN" },
+  { city: "Evansville", station: "KEVV" },
+  { city: "Lafayette", station: "KLAF" },
+  { city: "Bloomington", station: "KBMG" },
+  { city: "Terre Haute", station: "KHUF" },
+  { city: "Muncie", station: "KMIE" },
+  { city: "Grissom", station: "KGUS" },
+  { city: "Gary", station: "KGYY" },
 ];
 
 const EXTRA_CITIES = [
-  { city: "Alpena", station: "KAPN" },
-  { city: "Escanaba", station: "KESC" },
-  { city: "Ironwood", station: "KIWD" },
-  { city: "Traverse City", station: "KTVC" },
-  { city: "Saginaw", station: "KHYX" },
+  { city: "Crawfordsville", station: "KCQW" },
+  { city: "Kokomo", station: "KOKK" },
+  { city: "Anderson", station: "KAND" },
+  { city: "Columbus", station: "KBAK" },
+  { city: "Logansport", station: "KOKK" },
 ];
 
 const WEATHER_ICONS = {
@@ -2455,7 +2458,7 @@ function showNoWarningDashboard() {
     noWarningsBar.classList.add("show");
   }
 
-  document.querySelector(".event-type-bar").style.backgroundColor = "#1F2593";
+  document.querySelector(".event-type-bar").style.backgroundColor = "#606060";
 }
 
 function showWarningDashboard() {
