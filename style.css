@@ -325,13 +325,13 @@ body.overlay {
 
 .logo-container {
   position: fixed;
-  bottom: -60px;
-  left: -20px;
+  bottom: -80px;
+  left: -80px;
   z-index: 1020;
 }
 
 .logo {
-    width: 420px; /* Adjust size as needed */
+    width: 550px; /* Adjust size as needed */
     height: auto;
     transform-origin: center;
 }
@@ -531,8 +531,8 @@ body {
 
 .notification-type-label {
   position: absolute;
-  top: 5px;
-  left: 10px;
+  margin-top: 0px;
+  margin-left: 340px;
   font-size: 35px;
   padding: 2px 6px;
   border-radius: 3px;
@@ -612,10 +612,11 @@ body {
   right: 0;
   width: 764px;
   height: 90px;
-  background: linear-gradient(
-    to right,
-    rgba(100, 100, 100, 0.7) 0%,
-    rgba(50, 50, 50, 0) 100%
+  background: radial-gradient(
+    circle at left center,
+    rgba(0, 0, 0, 1) 0%,
+    rgba(0, 0, 0, 0.8) 30%,
+    rgba(0, 0, 0, 0) 100%
   );
   border-top-left-radius: 764px;
   border-bottom-left-radius: 764px;
@@ -626,7 +627,6 @@ body {
   box-sizing: border-box;
   z-index: 1030;
 }
-
 
 .time-date {
   display: flex;
@@ -712,7 +712,7 @@ body {
   position: relative;
   left: 184px;
   text-align: left;
-  font-size: 2em;
+  font-size: 2.2em;
   font-weight: bold;
   text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.7);
   color: white;
@@ -1961,12 +1961,14 @@ button:active {
   animation: pulseGlow 2.5s infinite ease-in-out;
   transition: all 0.3s ease;
   transform-origin: left center;
+  margin-top: 15px; /* Add this line to move it down */
 }
+
 
 .notification-expiration {
   position: absolute;
-  top: 40px;
-  right: 20px;
+  top: 5px;
+  left: 75px;
   font-size: 36px;
   font-weight: bold;
   color: white;
@@ -1974,7 +1976,7 @@ button:active {
   z-index: 10;
   padding: 3px 6px;
   border-radius: 3px;
-  text-align: right;
+  text-align: center;
 }
 
 .custom-alert-builder {
@@ -2079,6 +2081,68 @@ button:hover {
   }
 }
 
+.wind-hail-info {
+  position: absolute;
+  top: 90px; /* Adjust based on where the Expires text is */
+  right: 5px;
+  text-align: right;
+  font-size: 1.6em;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.wind-hail-info div {
+  padding: 2px 8px;
+  white-space: nowrap;
+  text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+@keyframes emojiGlowPulse {
+  0%, 100% {
+    text-shadow: 0 0 6px rgba(180, 180, 180, 0.3);
+    transform: scale(1);
+  }
+  50% {
+    text-shadow: 0 0 14px rgba(180, 180, 180, 0.45), 0 0 20px rgba(160, 160, 160, 0.35);
+    transform: scale(1.06);
+  }
+}
+
+.emoji-animated {
+  display: inline-block;
+  animation: emojiGlowPulse 2.5s ease-in-out infinite;
+}
+
+.hazard-source-info {
+  position: absolute;
+  top: 90px; /* Adjust as needed */
+  right: 10px;
+  color: #fff;
+  font-size: 1.3em;
+  line-height: 1.4;
+  padding: 0;
+  text-align: right;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  user-select: none;
+  text-shadow: 0 0 4px rgba(0,0,0,0.6);
+}
+
+.hazard-source-info div {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  transition: color 0.3s ease;
+}
+
+.hazard-source-info strong {
+  color: #ffcc00; /* highlight label */
+  margin-right: 6px;
+  text-shadow: 0 0 6px rgba(255, 204, 0, 0.8);
+}
+
+
 .active-alerts-box {
   display: none;
   position: fixed;
@@ -2113,6 +2177,7 @@ button:hover {
   max-height: 140px;
   overflow: hidden;
   line-height: 1.2;
+  margin-top: -15px;
 }
 
 .notification-calltoaction {
