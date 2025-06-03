@@ -327,13 +327,13 @@ body.overlay {
 
 .logo-container {
   position: fixed;
-  bottom: -60px;
-  left: -20px;
+  bottom: -80px;
+  left: -80px;
   z-index: 1020;
 }
 
 .logo {
-    width: 420px; /* Adjust size as needed */
+    width: 550px; /* Adjust size as needed */
     height: auto;
     transform-origin: center;
 }

@@ -1318,11 +1318,11 @@ function updateAlertBar() {
 
   const currentText =
     highestAlert.alert === "N/A"
-      ? "INDIANA WEATHER NETWORK"
+      ? "MICHIGAN STORM CHASERS"
       : highestAlert.originalAlert
       ? getEventName(highestAlert.originalAlert)
       : highestAlert.alert;
-  const currentColor = highestAlert.color || "#000000";
+  const currentColor = highestAlert.color || "#1F2593";
   const currentCount = activeWarnings.length;
 
   if (
@@ -1337,11 +1337,11 @@ function updateAlertBar() {
   lastWarningsCount = currentCount;
 
   if (highestAlert.alert === "N/A" && activeWarnings.length === 0) {
-    alertText.textContent = "INDIANA WEATHER NETWORK";
-    alertBar.style.backgroundColor = "#000000";
+    alertText.textContent = "MICHIGAN STORM CHASERS";
+    alertBar.style.backgroundColor = "#1F2593";
     activeAlertsBox.style.display = "none";
     semicircle.style.background =
-      "linear-gradient(to right, rgba(100, 100, 100, 0.7) 0%, rgba(50, 50, 50, 0) 100%)";
+      "linear-gradient(to right, rgb(0, 0, 0) 0%, rgba(0, 0, 0, 0) 100%)";
   } else if (highestAlert.alert) {
     alertText.textContent = currentText;
     alertBar.style.backgroundColor = highestAlert.color;
@@ -1353,7 +1353,7 @@ function updateAlertBar() {
     activeAlertsBox.textContent = "HIGHEST ACTIVE ALERT";
     activeAlertsBox.style.display = "block";
     semicircle.style.background =
-      "linear-gradient(to right, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 100%)";
+      "linear-gradient(to right, rgb(0, 0, 0) 0%, rgba(0, 0, 0, 0) 100%)";
   } else {
     alertText.textContent = "No valid alert found.";
     alertBar.style.backgroundColor = "#606060";
@@ -2527,11 +2527,17 @@ function TacticalMode(alerts, type = "NEW") {
     window.previousWarnings = new Map();
   }
 
+  // Get selected alert types from checkboxes
   const selectedAlertTypes = Array.from(
     document.querySelectorAll(
       '#checkboxContainer input[type="checkbox"]:checked'
     )
   ).map((cb) => cb.value);
+
+  // Get selected states (as abbreviations, e.g., ["MI", "IN"])
+  const selectedStates = (window.selectedStates && window.selectedStates.length > 0)
+    ? window.selectedStates.map(s => s.toUpperCase())
+    : ["US"]; // Default to all US if not set
 
   alerts.forEach((raw) => {
     const alert = raw?.feature || raw;
@@ -2553,6 +2559,44 @@ function TacticalMode(alerts, type = "NEW") {
       console.warn(`⚠️ Skipping alert [${id}] — missing event name`);
       return;
     }
+
+    // --- SAME code logic START ---
+    // Extract all SAME/FIPS codes from the alert (may be in geocode.SAME or parameters.SAME)
+    let sameCodes = [];
+    if (alert.geocode && alert.geocode.SAME) {
+      sameCodes = Array.isArray(alert.geocode.SAME)
+        ? alert.geocode.SAME
+        : [alert.geocode.SAME];
+    } else if (
+      alert.properties &&
+      alert.properties.parameters &&
+      alert.properties.parameters.SAME
+    ) {
+      sameCodes = Array.isArray(alert.properties.parameters.SAME)
+        ? alert.properties.parameters.SAME
+        : [alert.properties.parameters.SAME];
+    }
+
+    // If no SAME codes, allow through (for national alerts), else filter by state
+    let passesSameFilter = true;
+    if (
+      selectedStates.length > 0 &&
+      !selectedStates.includes("") &&
+      !selectedStates.includes("")
+    ) {
+      // Only allow alerts with at least one SAME code matching a selected state
+      passesSameFilter = sameCodes.some((code) => {
+        const stateAbbr = getStateFromSAME(code);
+        return selectedStates.includes(stateAbbr);
+      });
+      if (!passesSameFilter) {
+        console.log(
+          `⛔ Alert [${eventName}] (${id}) filtered out by SAME/state selection`
+        );
+        return;
+      }
+    }
+    // --- SAME code logic END ---
 
     const hasPolygon = !!(
       alert.polygon?.type === "Polygon" &&
@@ -2605,6 +2649,7 @@ function TacticalMode(alerts, type = "NEW") {
 
   console.log(`✅ [Done] ${activeWarnings.length} active warnings in memory`);
 }
+
 
 function isWarningExpired(warning) {
   if (!warning || !warning.properties || !warning.properties.expires) {
@@ -2742,24 +2787,28 @@ function cancelAlert(id) {
 let currentCityIndex = 0;
 
 const CITY_STATIONS = [
-  { city: "Indianapolis", station: "KIND" },
-  { city: "Fort Wayne", station: "KFWA" },
-  { city: "South Bend", station: "KSBN" },
-  { city: "Evansville", station: "KEVV" },
-  { city: "Lafayette", station: "KLAF" },
-  { city: "Bloomington", station: "KBMG" },
-  { city: "Terre Haute", station: "KHUF" },
-  { city: "Muncie", station: "KMIE" },
-  { city: "Grissom", station: "KGUS" },
-  { city: "Gary", station: "KGYY" },
+  { city: "Detroit", station: "KDTW" },
+  { city: "Lansing", station: "KLAN" },
+  { city: "Grand Rapids", station: "KGRR" },
+  { city: "Kalamazoo", station: "KAZO" },
+  { city: "Hillsdale", station: "KJYM" },
+  { city: "Flint", station: "KFNT" },
+  { city: "Bad Axe", station: "KBAX" },
+  { city: "Mount Pleasant", station: "KMOP" },
+  { city: "Ludington", station: "KLDM" },
+  { city: "Cadillac", station: "KCAD" },
+  { city: "Gaylord", station: "KGLR" },
+  { city: "Houghton", station: "KCMX" },
+  { city: "Marquette", station: "KSAW" },
+  { city: "Sault Ste. Marie", station: "KANJ" },
 ];
 
 const EXTRA_CITIES = [
-  { city: "Crawfordsville", station: "KCQW" },
-  { city: "Kokomo", station: "KOKK" },
-  { city: "Anderson", station: "KAND" },
-  { city: "Columbus", station: "KBAK" },
-  { city: "Logansport", station: "KOKK" },
+  { city: "Alpena", station: "KAPN" },
+  { city: "Escanaba", station: "KESC" },
+  { city: "Ironwood", station: "KIWD" },
+  { city: "Traverse City", station: "KTVC" },
+  { city: "Saginaw", station: "KHYX" },
 ];
 
 const WEATHER_ICONS = {
@@ -2940,7 +2989,7 @@ function showNoWarningDashboard() {
     noWarningsBar.classList.add("show");
   }
 
-  document.querySelector(".event-type-bar").style.backgroundColor = "#33333";
+  document.querySelector(".event-type-bar").style.backgroundColor = "#1F2593";
 }
 
 function showWarningDashboard() {
