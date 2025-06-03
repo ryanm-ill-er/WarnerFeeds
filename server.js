@@ -1,54 +1,99 @@
-const express = require('express');
-const cors = require('cors');
-const path = require('path');
-const axios = require('axios');
-// Removed: const fetch = require('node-fetch'); <-- cause that breaks CommonJS
+const express = require("express");
+const cors = require("cors");
+const path = require("path");
+const compression = require("compression");
+const EventSource = require("eventsource");
 
 const app = express();
 
+// 🧠 Memory cache to hold most recent alert(s)
+let lastAlerts = [];
+
 app.use(cors());
-
 app.use(express.static(path.join(__dirname)));
+app.use(
+  compression({
+    filter: (req, res) =>
+      req.headers.accept?.includes("text/event-stream")
+        ? false
+        : compression.filter(req, res),
+  })
+);
 
-app.get('/api/xmpp-alerts', async (req, res) => {
-  if (req.method === 'GET') {
+app.get("/api/xmpp-alerts", (req, res) => {
+  // 1️⃣ SSE headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders();
+
+  console.log(
+    `[${new Date().toISOString()}] 🚀 Client connected to /api/xmpp-alerts`
+  );
+
+  // 2️⃣ Send INIT right away if cached alerts exist
+  const initialState = lastAlerts.length > 0 ? lastAlerts : [];
+  res.write(`event: INIT\n`);
+  res.write(`data: ${JSON.stringify(initialState)}\n\n`);
+
+  // 3️⃣ Connect upstream
+  const upstreamUrl = "https://xmpp-api-production.up.railway.app/live-alerts";
+  const source = new EventSource(upstreamUrl);
+  console.log(`🔗 Connecting to upstream SSE: ${upstreamUrl}`);
+
+  // 4️⃣ Unified handler for all upstream events
+  function handleEventData(evt) {
     try {
-      const response = await axios.get('https://xmpp-api-production.up.railway.app/all-alerts');
-      res.status(200).json(response.data);
-    } catch (error) {
-      console.error('Error fetching from XMPP API:', error);
-      res.status(500).json({ error: 'Failed to fetch data from XMPP API' });
+      console.log(
+        `[${new Date().toISOString()}] 🔥 Upstream ${evt.type || "message"} event received`
+      );
+      const data = JSON.parse(evt.data);
+
+      // update cache
+      lastAlerts = Array.isArray(data)
+        ? data
+        : data.features
+        ? data.features
+        : [data];
+
+      const eventLine = evt.type !== "message" ? `event: ${evt.type}\n` : "";
+      res.write(`${eventLine}data: ${evt.data}\n\n`);
+      res.flush?.();
+    } catch (err) {
+      console.error("❌ Failed to relay upstream payload:", err);
     }
-  } else {
-    res.setHeader('Allow', ['GET']);
-    res.status(405).end(`Method ${req.method} Not Allowed`);
   }
-});
 
-app.get('/api/fetch-warnings', async (req, res) => {
-  try {
-    // Dynamic import of node-fetch in CommonJS
-    const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
+  // 5️⃣ Relay default unnamed messages
+  source.onmessage = handleEventData;
 
-    const response = await fetch('https://api.weather.gov/alerts/active?area=MI');
-    const data = await response.json();
+  // 6️⃣ Relay known named events
+  const knownEvents = ["INIT", "ALERT", "UPDATE", "CANCEL", "OTHER", "ALERT_CANCELED", "EXPIRE_ALERT", "CONTINUE", "NEW", "EXPIRE", "SPECIAL_WEATHER_STATEMENT", "EXPIRE_BEFORE_OPEN"];
+  knownEvents.forEach((eventType) => {
+    source.addEventListener(eventType, handleEventData);
+  });
 
-    const warnings = data.features.filter(feature =>
-      feature.properties.event === "Tornado Warning"
+  // 7️⃣ Keep-alive ping to client every 15s
+  const ping = setInterval(() => {
+    res.write("event: ping\ndata: {}\n\n");
+    res.flush?.();
+  }, 15000);
+
+  // 🧹 Cleanup on client close
+  const cleanUp = () => {
+    clearInterval(ping);
+    source.close();
+    res.end();
+    console.log(
+      `[${new Date().toISOString()}] 🛑 Client disconnected, closed upstream`
     );
+  };
 
-    res.status(200).json(warnings);
-  } catch (error) {
-    console.error('Error fetching weather warnings:', error);
-    res.status(500).json({ error: 'Failed to fetch warnings' });
-  }
-});
-
-app.get('/', (req, res) => {
-  res.sendFile(path.join(__dirname, 'index.html'));
+  req.on("close", cleanUp);
+  req.on("aborted", cleanUp);
 });
 
 const PORT = process.env.PORT || 3100;
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });

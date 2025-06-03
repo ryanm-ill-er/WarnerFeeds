@@ -103,15 +103,9 @@ const STATE_FIPS_TO_ABBR = {
   56: "WY",
 };
 
-function getStateFromSAME(sameCode) {
-  const fips = sameCode.slice(1, 3);
-  return STATE_FIPS_TO_ABBR[fips] || "Unknown";
-}
-
 let notificationsMuted = false;
 
 let currentTimeZone = "ET";
-let notifiedWarnings = new Map();
 
 const warningListElement = document.getElementById("warningList");
 const expirationElement = document.getElementById("expiration");
@@ -122,30 +116,247 @@ const tornadoCountElement = document.getElementById("tornadoCount");
 const thunderstormCountElement = document.getElementById("thunderstormCount");
 const floodCountElement = document.getElementById("floodCount");
 const winterWeatherCountElement = document.getElementById("winterWeatherCount");
-
 const socket = new WebSocket("");
 
-socket.addEventListener("message", (event) => {
-  const warning = JSON.parse(event.data);
-  activeWarnings.push({ properties: warning });
-  displayNotification({ properties: warning });
-  updateDashboard();
-});
+const alertEventTypes = [
+  "INIT",
+  "ALERT",
+  "UPDATE",
+  "CANCEL",
+  "OTHER",
+  "ALERT_CANCELED",
+  "EXPIRE_ALERT",
+  "CONTINUE",
+  "NEW",
+  "EXPIRE",
+  "SPECIAL_WEATHER_STATEMENT",
+  "EXPIRE_BEFORE_OPEN",
+  "message",
+];
 
-socket.addEventListener("open", () => {
-  console.log("✅ Connected to XMPP bridge server");
-});
+const cancelTypes = [
+  "CANCEL",
+  "ALERT_CANCELED",
+  "EXPIRE",
+  "EXPIRE_ALERT",
+  "EXPIRE_BEFORE_OPEN",
+];
 
-socket.addEventListener("error", (error) => {
-  console.error("❌ WebSocket Error:", error);
-});
+function initAlertStream() {
+  console.log("🔛 Tactical Alert Stream Engaged!");
+  const source = new EventSource("/api/xmpp-alerts");
 
-socket.addEventListener("message", (event) => {
-  const warning = JSON.parse(event.data);
-  activeWarnings.push({ properties: warning });
-  displayNotification({ properties: warning });
-  updateDashboard();
-});
+  source.addEventListener("open", () => {
+    console.log("✅ SSE Connected at /api/xmpp-alerts");
+  });
+
+  source.addEventListener("error", (err) => {
+    console.error("❌ SSE Error:", err);
+  });
+
+  if (!Array.isArray(alertEventTypes)) {
+    console.error("🚨 alertEventTypes is not defined or not an array.");
+    return;
+  }
+
+  // Handle different event types
+  [
+    "NEW",
+    "UPDATE",
+    "INIT",
+    "CONTINUE",
+    "CANCEL",
+    "OTHER",
+    "ALERT",
+    "ALERT_CANCELED",
+  ].forEach((eventType) => {
+    source.addEventListener(eventType, (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        console.log(`📩 Received ${eventType} event:`, data);
+        HandleAlertPayload(data, eventType);
+      } catch (error) {
+        console.error(`❌ Error processing ${eventType} event:`, error);
+      }
+    });
+  });
+}
+
+/**
+ * Extract the core identifier from a VTEC string or alert object
+ * @param {string|object} input - VTEC string or alert object with VTEC
+ * @returns {string|null} - Core identifier or null if not found
+ */
+function parseVtecCore(input) {
+  if (!input) return null;
+
+  // Handle objects with vtec property or properties.vtec
+  if (typeof input === "object") {
+    const vtec =
+      input.vtec ||
+      (input.properties && input.properties.vtec) ||
+      (input.properties &&
+        input.properties.parameters &&
+        input.properties.parameters.VTEC);
+
+    if (Array.isArray(vtec) && vtec.length > 0) {
+      return parseVtecCore(vtec[0]);
+    } else if (typeof vtec === "string") {
+      return parseVtecCore(vtec);
+    }
+    return null;
+  }
+
+  // Handle VTEC string directly
+  if (typeof input === "string") {
+    const parsed = parseVTEC(input);
+    return parsed.core || null;
+  }
+
+  return null;
+}
+
+function isWarningExpired(warning) {
+  if (!warning || !warning.properties || !warning.properties.expires) {
+    return false; // Can't determine expiration, assume not expired
+  }
+
+  const expiresDate = new Date(warning.properties.expires);
+  return expiresDate < new Date();
+}
+
+function isAlertTypeSelected(alert) {
+  // If selectedAlerts is not defined or not a Set, consider all alerts as selected
+  if (!selectedAlerts || !(selectedAlerts instanceof Set)) {
+    console.warn(
+      "⚠️ selectedAlerts is not defined or not a Set - defaulting to true"
+    );
+    return true;
+  }
+
+  // Handle both string event names and alert objects
+  const eventName = typeof alert === "string" ? alert : getEventName(alert);
+
+  // Check if the event name is in the selectedAlerts Set
+  return selectedAlerts.has(eventName);
+}
+
+function HandleAlertPayload(payload, eventType) {
+  console.log("HandleAlertPayload function called.");
+
+  // 1) Unwrap and normalize
+  let alerts, type;
+
+  if (Array.isArray(payload)) {
+    alerts = payload;
+    type = eventType || "NEW";
+  } else if (payload.alerts) {
+    alerts = payload.alerts;
+    type = payload.type || eventType || "NEW";
+  } else {
+    alerts = [payload];
+    type = eventType || "NEW";
+  }
+
+  // 2) sanity check
+  if (!Array.isArray(alerts) || !type) {
+    console.warn("⚠️ Invalid alerts/type after unwrap:", { alerts, type });
+    return;
+  }
+  alerts = alerts.filter((a) => a && typeof a === "object");
+
+  // 3) hand off to TacticalMode
+  TacticalMode(alerts, type);
+}
+
+function normalizeAlertsFromEvent(event) {
+  try {
+    if (!event?.data) return [];
+
+    const jsonStr = event.data
+      .trim()
+      .replace(/,\s*([\]}])/g, "$1")
+      .replace(/^[\uFEFF\xA0]+|[\uFEFF\xA0]+$/g, "");
+
+    const parsed = JSON.parse(jsonStr);
+    let rawAlerts = [];
+
+    if (parsed?.features && Array.isArray(parsed.features)) {
+      rawAlerts = parsed.features;
+    } else if (parsed?.feature) {
+      rawAlerts = [parsed.feature];
+    } else if (Array.isArray(parsed)) {
+      rawAlerts = parsed;
+    } else if (parsed?.id && parsed?.eventName) {
+      rawAlerts = [parsed];
+    } else if (parsed?.id && parsed?.type === "CANCEL") {
+      rawAlerts = [
+        {
+          id: parsed.id,
+          eventName: "Alert Canceled",
+          eventCode: "",
+          counties: [],
+          office: "",
+          action: "",
+          vtec: "",
+          effective: "",
+          expires: "",
+          rawText: "",
+          geocode: {},
+          threats: {},
+          source: "cancel_event",
+          polygon: null,
+          geometry: null,
+        },
+      ];
+    }
+
+    rawAlerts = rawAlerts.filter((a) => a && typeof a === "object");
+
+    return rawAlerts.map((alert) => {
+      const props = {
+        event: alert.eventName || "Unknown Event",
+        areaDesc: Array.isArray(alert.counties)
+          ? alert.counties.join("; ")
+          : "Unknown area",
+        expires: alert.expires || null,
+        office: alert.office || null,
+        action: alert.action || null,
+        vtec: alert.vtec || null,
+        effective: alert.effective || null,
+        rawText: alert.rawText || null,
+        geocode: alert.geocode || {},
+        parameters: {},
+      };
+
+      if (alert.threats && typeof alert.threats === "object") {
+        for (const [key, val] of Object.entries(alert.threats)) {
+          props.parameters[key] = Array.isArray(val) ? val : [val];
+        }
+      }
+
+      if (alert.source) {
+        props.parameters.source = [alert.source];
+      }
+
+      return {
+        id: alert.id || null,
+        normalizedId: alert.id || null,
+        properties: props,
+        geometry: alert.polygon?.type
+          ? {
+              type: alert.polygon.type,
+              coordinates: alert.polygon.coordinates,
+            }
+          : alert.geometry || null,
+      };
+    });
+  } catch (err) {
+    console.error(`❌ normalizeAlertsFromEvent() failed:`, err);
+    console.error("Raw event data:", event?.data);
+    return [];
+  }
+}
 
 let previousWarningIds = new Set();
 
@@ -159,7 +370,7 @@ const labels = {
 let currentWarningIndex = 0;
 let activeWarnings = [];
 let previousWarningVersions = new Map();
-let previousWarnings = new Map();
+const previousWarnings = new Map();
 
 document.body.addEventListener("click", enableSound);
 
@@ -194,47 +405,6 @@ function toggleslider() {
   } else {
     slider.style.transform = "translateY(0%)";
     body.classList.add("overlay");
-  }
-}
-
-function handleApiResponse(response) {
-  try {
-    let cleanResponse = response
-      .trim()
-      .replace(/,\s*([\]}])/g, "$1")
-      .replace(/^[\uFEFF\xA0]+|[\uFEFF\xA0]+$/g, "");
-
-    let parsedResponse = JSON.parse(cleanResponse);
-
-    if (!Array.isArray(parsedResponse)) {
-      console.warn(
-        "Received a single alert object, wrapping it into an array."
-      );
-      parsedResponse = [parsedResponse];
-    }
-
-    parsedResponse.forEach((alert) => {
-      const eventName = getEventName(alert);
-      const counties = formatCountiesNotification(alert.properties.areaDesc);
-
-      console.log(`Event: ${eventName}, Counties: ${counties}`);
-
-      const warning = {
-        properties: {
-          event: eventName,
-          areaDesc: counties,
-          expires: alert.properties.expires,
-          description: alert.properties.description,
-          instruction: alert.properties.instruction,
-        },
-      };
-      showNotification(warning);
-    });
-  } catch (error) {
-    console.error("Error parsing response:", error);
-    alert(
-      "⚠️ Invalid JSON input!\n\nTip: Make sure your JSON is valid, no missing commas, brackets, etc.\nAlso make sure to wrap your object inside [ ] if needed!"
-    );
   }
 }
 
@@ -426,8 +596,9 @@ function testNotification(eventName) {
     tornadoDetection: ["RADAR INDICATED"],
   };
 
-  // Prepare a description string (so HAZARD... and SOURCE... show up)
+  // Prepare description & hazard/source for Tornado Warning variants
   let description = "";
+
   if (
     eventName === "Tornado Warning" ||
     eventName === "PDS Tornado Warning" ||
@@ -510,8 +681,39 @@ function testNotification(eventName) {
   updateDashboard(warning);
 }
 
+function normalizeAlert(alert) {
+  if (!alert || typeof alert !== "object") return null;
+
+  const props = alert.properties || {};
+  const fallbackEvent = alert.eventName || props.event || "Unknown Event";
+  const fallbackArea = Array.isArray(alert.counties)
+    ? alert.counties.join("; ")
+    : props.areaDesc || "Unknown Area";
+
+  return {
+    id: alert.id || props.id || `unknown-${Date.now()}`,
+    geometry: alert.geometry || null,
+    rawText: alert.rawText || props.rawText || "",
+    vtec: alert.vtec || props.vtec || "",
+    properties: {
+      event: fallbackEvent,
+      expires: props.expires || alert.expires || "",
+      areaDesc: fallbackArea,
+      parameters: props.parameters || alert.threats || {},
+      ...props, // keep original props if they exist
+    },
+  };
+}
 
 function updateWarningCounters(warning) {
+  if (!warning || !warning.properties || !warning.properties.event) {
+    console.warn(
+      "⚠️ updateWarningCounters skipped malformed warning:",
+      warning
+    );
+    return;
+  }
+
   const eventType = warning.properties.event;
 
   let tornadoCount = parseInt(
@@ -556,32 +758,6 @@ function updateHighestAlert() {
   if (sortedWarnings.length > 0) {
     const highestAlert = sortedWarnings[0];
     const eventName = getEventName(highestAlert);
-
-    const emergencyAlert = document.querySelector(".emergency-alert");
-    if (emergencyAlert) {
-      emergencyAlert.style.display = "block";
-
-      if (
-        eventName === "Tornado Emergency" ||
-        eventName === "PDS Tornado Warning"
-      ) {
-        emergencyAlert.innerHTML =
-          "THIS IS AN EXTREMELY DANGEROUS SITUATION. TAKE COVER NOW!";
-      } else if (eventName === "Observed Tornado Warning") {
-        emergencyAlert.innerHTML =
-          "A TORNADO IS ON THE GROUND! TAKE COVER NOW!";
-      } else if (eventName === "Severe Thunderstorm Warning (Destructive)") {
-        emergencyAlert.innerHTML = "THESE ARE VERY DANGEROUS STORMS!";
-      } else {
-        emergencyAlert.innerHTML = getCallToAction(eventName);
-      }
-
-      emergencyAlert.className = "emergency-alert";
-      const styleClass = eventTypes[eventName];
-      if (styleClass) {
-        emergencyAlert.classList.add(styleClass);
-      }
-    }
   }
 }
 
@@ -600,34 +776,40 @@ function testMostRecentAlert() {
 }
 
 function getEventName(alert) {
-  if (!alert || !alert.properties) return "Unknown Event";
+  if (!alert) return "Unknown Event";
 
-  const props = alert.properties;
-  const event = props.event || "Unknown Event";
-  const params = props.parameters || {};
+  const props =
+    alert.properties || alert.feature?.properties || alert.feature || alert;
 
-  const thunderThreat = params.thunderstormDamageThreat?.[0]?.toUpperCase();
-  const tornadoThreat = params.tornadoDamageThreat?.[0]?.toUpperCase();
-  const tornadoDetection = params.tornadoDetection?.[0]?.toUpperCase();
-  const flashFloodThreat = params.flashFloodDamageThreat?.[0]?.toUpperCase();
+  const event = props.eventName || props.event || "Unknown Event";
+
+  const tornadoDamageThreat = (alert.tornadoDamageThreat || "").toUpperCase();
+  const tornadoDetection = (alert.tornadoDetection || "").toUpperCase();
+  const thunderstormDamageThreat = (
+    alert.thunderstormDamageThreat || ""
+  ).toUpperCase();
+  const flashFloodDamageThreat = (
+    alert.flashFloodDamageThreat || ""
+  ).toUpperCase();
 
   if (event.includes("Tornado Warning")) {
-    if (tornadoThreat === "CATASTROPHIC") return "Tornado Emergency";
-    if (tornadoThreat === "CONSIDERABLE") return "PDS Tornado Warning";
+    if (tornadoDamageThreat === "CATASTROPHIC") return "Tornado Emergency";
+    if (tornadoDamageThreat === "CONSIDERABLE") return "PDS Tornado Warning";
     if (tornadoDetection === "OBSERVED") return "Observed Tornado Warning";
     return "Tornado Warning";
   }
 
   if (event.includes("Severe Thunderstorm Warning")) {
-    if (thunderThreat === "CONSIDERABLE")
-      return "Severe Thunderstorm Warning (Considerable)";
-    if (thunderThreat === "DESTRUCTIVE")
+    if (thunderstormDamageThreat === "DESTRUCTIVE")
       return "Severe Thunderstorm Warning (Destructive)";
+    if (thunderstormDamageThreat === "CONSIDERABLE")
+      return "Severe Thunderstorm Warning (Considerable)";
     return "Severe Thunderstorm Warning";
   }
 
   if (event.includes("Flash Flood Warning")) {
-    if (flashFloodThreat === "CATASTROPHIC") return "Flash Flood Emergency";
+    if (flashFloodDamageThreat === "CATASTROPHIC")
+      return "Flash Flood Emergency";
     return "Flash Flood Warning";
   }
 
@@ -651,100 +833,345 @@ document
       buttonText;
   });
 
-function showNotification(warning) {
+// globals—ensure these live outside any function
+const notifiedWarnings = new Map();
+let emergencyText = "";
+
+function showNotification(
+  warning,
+  actionType = "NEW",
+  isUpdate = false,
+  currentVersion
+) {
   const eventName = getEventName(warning);
-  console.log(`Event Name in Notification: ${eventName}`);
+  const warningId = warning.id.trim().toUpperCase();
 
-  const warningId = warning.id;
-  const currentVersion =
-    warning.properties.parameters?.NWSheadline?.[0] || warning.properties.sent;
-  const messageType = warning.properties?.messageType;
+  // Use provided version or fall back to other properties
+  currentVersion =
+    currentVersion ||
+    warning.properties.parameters?.NWSheadline?.[0] ||
+    warning.properties.sent;
 
-  const isNew = !notifiedWarnings.has(warningId);
-  const isUpdated =
-    !isNew && notifiedWarnings.get(warningId) !== currentVersion;
-  const previousEvent = previousWarnings.get(warningId);
-  const isUpgrade = !isNew && previousEvent && previousEvent !== eventName;
+  const hasBeenNotified = notifiedWarnings.has(warningId);
 
-  console.log(
-    `Notification Status - New: ${isNew}, Updated: ${isUpdated}, Upgrade: ${isUpgrade}`
-  );
+  console.log("⚙️ Processing warning...");
+  console.log("Warning Object:", warning);
+  console.log(`🆔 ID: ${warningId}`);
+  console.log(`📛 Event Name: ${eventName}`);
+  console.log(`📤 Action Type: ${actionType}`);
+  console.log(`🔁 Already Notified: ${hasBeenNotified}`);
+  console.log(`📌 Current Version: ${currentVersion}`);
+  console.log(`📦 Raw Warning Object:`, warning);
 
-  if (warningId) {
-    previousWarnings.set(warningId, eventName);
+  // 🛑 Cancel logic first
+  if (["CAN", "EXP", "CANX", "CANCEL"].includes(actionType)) {
+    cancelAlert(warning.id);
+    console.log(`🛑 Alert Cancelled (${actionType}) - ID: ${warningId}`);
+    return;
   }
 
-  if (isNew || isUpdated || isUpgrade) {
-    let notificationType = "NEW WEATHER ALERT:";
-    if (messageType === "Update" || isUpdated) {
-      notificationType = "UPDATED ALERT:";
+  // 🎯 Determine new vs update vs init
+  let isNew = false;
+  let isUpdated = false;
+  let isInit = false;
 
-      if (
-        eventName === "Tornado Warning" ||
-        eventName === "Observed Tornado Warning"
-      ) {
-        playSoundById("TorUpdateSound");
-      } else if (eventName === "PDS Tornado Warning") {
-        playSoundById("TorPDSUpdateSound");
-      } else if (eventName === "Tornado Emergency") {
-        playSoundById("TorEmergencyUpdateSound");
-      } else {
-        playSoundById("SVRCSound");
-      }
-    } else if (isUpgrade) {
-      notificationType = "ALERT UPGRADED:";
-      playSoundById("TORUPG");
-    } else {
-      if (eventName.includes("Tornado Emergency")) {
-        playSoundById("TOREISS");
-      } else if (eventName === "PDS Tornado Warning") {
-        playSoundById("TorPDSSound");
-      } else if (
-        eventName === "Tornado Warning" ||
-        eventName === "Observed Tornado Warning"
-      ) {
-        playSoundById("TorIssSound");
-      } else if (eventName === "Severe Thunderstorm Warning") {
-        playSoundById("SVRCSound");
-      } else if (eventName === "Severe Thunderstorm Warning (Considerable)") {
-        playSoundById("SVRCNEWSound");
-      } else if (eventName === "Severe Thunderstorm Warning (Destructive)") {
-        playSoundById("PDSSVRSound");
-      } else if (eventName.includes("Tornado Watch")) {
-        playSoundById("TOAWatch");
-      } else if (eventName.includes("Severe Thunderstorm Watch")) {
-        playSoundById("SVAWatch");
-      } else {
-        playSoundById("SVRCSound");
-      }
-    }
+  const updateActions = ["CON", "EXT", "EXA", "UPG", "COR", "ROU"];
+  const newActions = ["NEW"];
+  const initActions = ["INIT"];
 
-    console.log(`Determined Notification Type: ${notificationType}`);
-
-    notifiedWarnings.set(warningId, currentVersion);
-    console.log(`Stored current version for warning ID: ${warningId}`);
-
-    if (isNotificationQueueEnabled) {
-      notificationQueue.push({ warning, notificationType });
-      console.log(
-        `Added to notification queue: ${notificationType} for ${eventName}`
-      );
-      processNotificationQueue();
-    } else {
-      displayNotification(warning, notificationType);
-      console.log(`Displayed notification immediately for ${eventName}`);
-    }
-
+  if (newActions.includes(actionType)) {
+    isNew = true;
+    console.log("🆕 Action indicates this is a NEW alert.");
+  } else if (updateActions.includes(actionType)) {
+    isUpdated = true;
+    console.log("🔄 Action indicates this is an UPDATED alert.");
+  } else if (initActions.includes(actionType)) {
+    isInit = true;
+    console.log("🏁 Action indicates this is an INIT alert.");
+  } else if (!hasBeenNotified) {
+    isNew = true;
+    console.log("🧠 This ID hasn't been notified before. Marking as NEW.");
+  } else if (notifiedWarnings.get(warningId) !== currentVersion) {
+    isUpdated = true;
     console.log(
-      `🔔 Notification shown for ${eventName} (ID: ${warningId}, ${
-        isNew ? "New" : isUpdated ? "Updated" : "Upgraded"
-      })`
+      `🔁 Version mismatch (was: ${notifiedWarnings.get(
+        warningId
+      )}, now: ${currentVersion}). Marking as UPDATED.`
+    );
+  } else if (previousWarnings.get(warningId) !== eventName) {
+    isUpdated = true;
+    console.log(
+      `🔃 Event name changed (was: ${previousWarnings.get(
+        warningId
+      )}, now: ${eventName}). Marking as UPDATED.`
     );
   } else {
-    console.log(
-      `🔇 Skipping notification for already notified ${eventName} (ID: ${warningId})`
-    );
+    console.log(`⚠️ Duplicate/stale alert ignored: ${warningId}`);
+    return;
   }
+
+  console.log(
+    `✅ Determined notification status — New: ${isNew}, Updated: ${isUpdated}, Init: ${isInit}`
+  );
+
+  // 🏷️ Notification label
+  let notificationType = "NEW WEATHER ALERT:"; // Default notification type
+  if (isInit) {
+    notificationType = "INITIALIZED ALERT:";
+    // For INIT alerts, just update state without notification
+    previousWarnings.set(warningId, eventName);
+    notifiedWarnings.set(warningId, currentVersion);
+    console.log(`🧠 State updated for ${warningId} (INIT, no notification)`);
+    return; // Return early for INIT without showing notification
+  } else if (isUpdated) {
+    notificationType = "ALERT UPDATED:";
+  }
+
+  console.log(`🏷️ Notification Label: ${notificationType}`);
+
+  // 🔊 Pick your fighter
+  const soundId = getSoundForEvent(eventName, isUpdated);
+  console.log(`🔊 Playing sound ID: ${soundId}`);
+  playSoundById(soundId);
+
+  // 🧠 Track state
+  previousWarnings.set(warningId, eventName);
+  notifiedWarnings.set(warningId, currentVersion);
+  console.log(`🧠 State updated for ${warningId}`);
+
+  switch (eventName) {
+    case "Severe Thunderstorm Warning (Destructive)":
+      emergencyText = "THIS IS A DANGEROUS SITUATION";
+      break;
+    case "Flash Flood Emergency":
+      emergencyText = "SEEK HIGHER GROUND IMMEDIATELY";
+      break;
+    case "Observed Tornado Warning":
+      emergencyText = "A TORNADO IS ON THE GROUND";
+      break;
+    case "PDS Tornado Warning":
+      emergencyText =
+        "A LARGE AND EXTREMELY DANGEROUS TORNADO IS ON THE GROUND";
+      break;
+    case "Tornado Emergency":
+      emergencyText = "A VIOLENT AND PERHAPS DEADLY TORNADO IS ON THE GROUND";
+      break;
+    default:
+      emergencyText = "";
+  }
+
+  // 🚀 Fire it off
+  if (isNotificationQueueEnabled) {
+    console.log("🧾 Notification queue enabled — pushing to queue.");
+    notificationQueue.push({ warning, notificationType, emergencyText });
+    processNotificationQueue();
+  } else {
+    console.log("⚡ Notification queue disabled — showing directly.");
+    displayNotification(warning, notificationType, emergencyText);
+  }
+
+  console.log(
+    `🔔 Notification shown for ${eventName} (ID: ${warningId}, ${
+      isNew ? "New" : "Updated"
+    })`
+  );
+}
+
+function getSoundForEvent(eventName, isUpdated) {
+  if (isUpdated) {
+    if (eventName.includes("Tornado Emergency"))
+      return "TorEmergencyUpdateSound";
+    if (eventName.includes("PDS Tornado Warning")) return "TorPDSUpdateSound";
+    if (eventName.includes("Tornado Warning")) return "TorUpdateSound";
+    return "SVRCSound";
+  } else {
+    if (eventName.includes("Tornado Emergency")) return "TOREISS";
+    if (eventName.includes("PDS Tornado Warning")) return "TorPDSSound";
+    if (eventName.includes("Tornado Warning")) return "TorIssSound";
+    if (eventName.includes("Destructive")) return "PDSSVRSound";
+    if (eventName.includes("Considerable")) return "SVRCNEWSound";
+    if (eventName.includes("Severe Thunderstorm Warning")) return "SVRCSound";
+    if (eventName.includes("Tornado Watch")) return "TOAWatch";
+    if (eventName.includes("Severe Thunderstorm Watch")) return "SVAWatch";
+    return "SVRCSound";
+  }
+}
+
+function displayNotification(warning, notificationType) {
+  if (notificationsMuted) return; // no logging, keep it chill
+
+  const eventName = getEventName(warning);
+  const description = warning.rawText || warning.properties?.rawText || "";
+  const rawAreaDesc = Array.isArray(warning.counties)
+    ? warning.counties.join(", ")
+    : warning.properties?.areaDesc || "";
+  const cleanAreaDesc = rawAreaDesc.replace(/^TEST\s*-\s*/i, "").trim();
+
+  // Build container
+  const notification = document.createElement("div");
+  notification.className = "notification-popup";
+
+  const counties = cleanAreaDesc
+    .split(";")
+    .map((c) => c.trim())
+    .filter(Boolean);
+
+  notification.style.bottom =
+    counties.length > 20 ? "170px" : counties.length > 10 ? "120px" : "70px";
+
+  // Type label
+  const typeLabel = document.createElement("div");
+  typeLabel.className = "notification-type-label";
+  typeLabel.textContent = notificationType;
+  notification.appendChild(typeLabel);
+
+  // Title
+  const title = document.createElement("div");
+  title.className = "notification-title";
+  title.textContent = eventName;
+  notification.appendChild(title);
+
+  // Area/counties
+  const countyDiv = document.createElement("div");
+  countyDiv.className = "notification-message";
+  countyDiv.textContent = cleanAreaDesc;
+  notification.appendChild(countyDiv);
+
+  // Expiration
+  const expirationEl = document.createElement("div");
+  expirationEl.className = "notification-expiration";
+  const expires = new Date(
+    warning.expires || warning.properties?.expires || Date.now()
+  );
+  expirationEl.textContent = `EXPIRES: ${expires.toLocaleTimeString("en-US", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  })}`;
+  notification.appendChild(expirationEl);
+
+  if (emergencyText) {
+    const emergencyWrapper = document.createElement("div");
+    emergencyWrapper.className = "emergency-alert";
+    emergencyWrapper.style.display = "flex";
+    emergencyWrapper.style.alignItems = "center";
+    emergencyWrapper.style.justifyContent = "flex-end"; // aligns icon + text right
+    emergencyWrapper.style.gap = "10px"; // space between icon and text
+    emergencyWrapper.style.fontSize = "36px";
+    emergencyWrapper.style.color = "#FFFFFF";
+
+    const iconDiv = document.createElement("div");
+    iconDiv.className = "emergency-icon";
+
+    const iconImg = document.createElement("img");
+    iconImg.src = "https://i.postimg.cc/DwFyZb3k/Exclamation.png";
+    iconImg.alt = "Emergency Icon";
+    iconImg.className = "logo";
+    iconImg.id = "pulseLogo";
+
+    iconDiv.appendChild(iconImg);
+
+    const emergencyTextElement = document.createElement("div");
+    emergencyTextElement.textContent = emergencyText;
+
+    emergencyWrapper.appendChild(iconDiv);
+    emergencyWrapper.appendChild(emergencyTextElement);
+
+    notification.appendChild(emergencyWrapper);
+  }
+
+  // Hazard/source for Tornado warnings (using rawText description)
+  if (eventName.toLowerCase().includes("tornado")) {
+    const haz = (
+      description.match(/HAZARD\.{3}\s*([^\n\r]*)/i)?.[1] ||
+      warning.tornadoDamageThreat ||
+      "N/A"
+    ).trim();
+    const src = (
+      description.match(/SOURCE\.{3}\s*([^\n\r]*)/i)?.[1] || "N/A"
+    ).trim();
+
+    // 🔥 Emoji selector for hazard severity/type
+    const getHazardEmoji = (hazard) => {
+      const h = hazard.toLowerCase();
+      if (h.includes("deadly tornado")) return "❗";
+      if (h.includes("damaging tornado")) return "❗";
+      if (h.includes("tornado")) return "⚠️";
+      return "⚠️";
+    };
+
+    // 🕵️‍♂️ Emoji selector for source reliability/confirmation
+    const getSourceEmoji = (source) => {
+      const s = source.toLowerCase();
+      if (s.includes("weather spotter")) return "🔍";
+      if (s.includes("radar indicated")) return "📡";
+      if (s.includes("radar confirmed")) return "📡";
+      if (s.includes("public")) return "👁️";
+      return "❓";
+    };
+
+    const hs = document.createElement("div");
+    hs.className = "hazard-source-info";
+    hs.innerHTML = `
+    <div><strong>HAZARD:</strong> ${getHazardEmoji(haz)}${haz}${getHazardEmoji(haz)}</div>
+    <div><strong>SOURCE:</strong> ${getSourceEmoji(src)}${src}${getSourceEmoji(src)}</div>
+  `;
+    notification.appendChild(hs);
+  }
+
+  // Wind/hail for Severe Thunderstorm Warning - prefer new format fields
+  if (eventName.toLowerCase().includes("severe thunderstorm warning")) {
+    const maxWind =
+      warning.threats?.maxWindGust ||
+      warning.maxWindGust ||
+      warning.properties?.parameters?.maxWindGust?.[0] ||
+      "N/A";
+    const maxHail =
+      warning.threats?.maxHailSize ||
+      warning.maxHailSize ||
+      warning.properties?.parameters?.maxHailSize?.[0] ||
+      "N/A";
+
+    const wh = document.createElement("div");
+    wh.className = "wind-hail-info";
+
+    // Separate divs for wind and hail, emoji + text inline
+    wh.innerHTML = `
+    <div>${getWindEmoji(maxWind)} Wind: ${maxWind}${getWindEmoji(maxWind)}</div>
+    <div>${getHailEmoji(maxHail)} Hail: ${maxHail}${getHailEmoji(maxHail)}</div>
+  `;
+
+    notification.appendChild(wh);
+  }
+
+  // Pulse logo animation
+  const logo = document.getElementById("pulseLogo");
+  if (logo) {
+    logo.classList.remove("notification-pulse");
+    void logo.offsetWidth; // trigger reflow for restart animation
+    logo.classList.add("notification-pulse");
+    setTimeout(() => logo.classList.remove("notification-pulse"), 2000);
+  }
+
+  // Append & animate
+  document.body.appendChild(notification);
+  notification.style.transform = "translateY(100%)";
+  notification.style.backgroundColor = getAlertColor(eventName);
+  notification.style.opacity = 1;
+  notification.style.transition = "transform 0.85s cubic-bezier(0.4,0,0.2,1)";
+
+  setTimeout(() => (notification.style.transform = "translateY(50%)"), 50);
+
+  const duration =
+    eventName.toLowerCase().includes("tornado") || eventName.includes("PDS")
+      ? 10000
+      : 7000;
+  setTimeout(() => {
+    notification.style.transform = "translateY(100%)";
+    setTimeout(() => notification.remove(), 500);
+  }, duration);
+
+  updateWarningList(activeWarnings);
 }
 
 function processNotificationQueue() {
@@ -840,6 +1267,10 @@ function toggleTimeZone() {
   }
   updateClock();
 }
+// Call this after DOMContentLoaded or after activeWarnings is initialized
+setInterval(() => {
+  updateWarningList(activeWarnings);
+}, 30000);
 
 setInterval(updateClock, 1000);
 updateClock();
@@ -849,18 +1280,49 @@ let lastAlertColor = "";
 let lastWarningsCount = 0;
 
 function updateAlertBar() {
+  function darkenColor(color, percent = 20) {
+    let r, g, b;
+
+    if (color.startsWith("#")) {
+      if (color.length === 7) {
+        r = parseInt(color.slice(1, 3), 16);
+        g = parseInt(color.slice(3, 5), 16);
+        b = parseInt(color.slice(5, 7), 16);
+      } else if (color.length === 4) {
+        r = parseInt(color[1] + color[1], 16);
+        g = parseInt(color[2] + color[2], 16);
+        b = parseInt(color[3] + color[3], 16);
+      } else {
+        return color;
+      }
+
+      const factor = (100 - percent) / 100;
+
+      r = Math.floor(r * factor);
+      g = Math.floor(g * factor);
+      b = Math.floor(b * factor);
+
+      const toHex = (n) => n.toString(16).padStart(2, "0");
+
+      return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+    }
+
+    return color;
+  }
+
   const highestAlert = getHighestActiveAlert();
   const alertBar = document.getElementById("alertBar");
   const alertText = document.getElementById("highestAlertText");
   const activeAlertsBox = document.querySelector(".active-alerts-box");
+  const semicircle = document.querySelector(".semicircle");
 
   const currentText =
     highestAlert.alert === "N/A"
-      ? "MICHIGAN STORM CHASERS"
+      ? "INDIANA WEATHER NETWORK"
       : highestAlert.originalAlert
       ? getEventName(highestAlert.originalAlert)
       : highestAlert.alert;
-  const currentColor = highestAlert.color || "#1F2593";
+  const currentColor = highestAlert.color || "#000000";
   const currentCount = activeWarnings.length;
 
   if (
@@ -875,20 +1337,29 @@ function updateAlertBar() {
   lastWarningsCount = currentCount;
 
   if (highestAlert.alert === "N/A" && activeWarnings.length === 0) {
-    alertText.textContent = "MICHIGAN STORM CHASERS";
-    alertBar.style.backgroundColor = "#1F2593";
+    alertText.textContent = "INDIANA WEATHER NETWORK";
+    alertBar.style.backgroundColor = "#000000";
     activeAlertsBox.style.display = "none";
+    semicircle.style.background =
+      "linear-gradient(to right, rgba(100, 100, 100, 0.7) 0%, rgba(50, 50, 50, 0) 100%)";
   } else if (highestAlert.alert) {
     alertText.textContent = currentText;
     alertBar.style.backgroundColor = highestAlert.color;
-    const darkerGlow = darkenColor(highestAlert.color, 0.2);
+
+    // Darken glow by 20%
+    const darkerGlow = darkenColor(highestAlert.color, 20);
     alertBar.style.setProperty("--glow-color", darkerGlow);
+
     activeAlertsBox.textContent = "HIGHEST ACTIVE ALERT";
     activeAlertsBox.style.display = "block";
+    semicircle.style.background =
+      "linear-gradient(to right, rgba(0, 0, 0, 1) 0%, rgba(0, 0, 0, 0) 100%)";
   } else {
     alertText.textContent = "No valid alert found.";
-    alertBar.style.backgroundColor = "#1F2593";
+    alertBar.style.backgroundColor = "#606060";
     activeAlertsBox.style.display = "none";
+    semicircle.style.background =
+      "linear-gradient(to right, rgba(100, 100, 100, 0.7) 0%, rgba(50, 50, 50, 0) 100%)";
   }
 }
 
@@ -1011,7 +1482,7 @@ function displayWarningDetails(warning) {
   const closeButton = document.createElement("span");
   closeButton.className = "close-modal";
   closeButton.innerHTML = "&times;";
-  closeButton.onclick = function () {
+  closeButton.onclick = () => {
     modal.style.display = "none";
   };
   content.appendChild(closeButton);
@@ -1029,12 +1500,18 @@ function displayWarningDetails(warning) {
   title.innerHTML = `${emoji} <span class="event-emoji"></span>${eventName}`;
   header.appendChild(title);
 
+  // New format: use counties array or fallback string
+  const areaDescText = Array.isArray(warning.counties)
+    ? warning.counties.join(", ")
+    : warning.areaDesc || "Area information unavailable";
+
   const areaDesc = document.createElement("h3");
-  areaDesc.textContent = warning.properties.areaDesc;
+  areaDesc.textContent = areaDescText;
   header.appendChild(areaDesc);
 
   content.appendChild(header);
 
+  // Timing & Details section
   const infoSection = document.createElement("div");
   infoSection.className = "detail-section";
 
@@ -1045,72 +1522,71 @@ function displayWarningDetails(warning) {
   const infoContainer = document.createElement("div");
   infoContainer.className = "detail-info";
 
-  const params = warning.properties.parameters || {};
+  // For new format, some date fields are at top-level
+  const issuedDate = warning.sent ? new Date(warning.sent) : null;
+  const expiresDate = warning.expires ? new Date(warning.expires) : null;
+
   const details = [
     {
       label: "Issued",
-      value: new Date(warning.properties.sent).toLocaleString(),
+      value: issuedDate ? issuedDate.toLocaleString() : "Unknown",
     },
     {
       label: "Expires",
-      value: new Date(warning.properties.expires).toLocaleString(),
+      value: expiresDate ? expiresDate.toLocaleString() : "Unknown",
     },
   ];
 
-  if (params.eventMotionDescription && params.eventMotionDescription[0]) {
-    const motionDesc = params.eventMotionDescription[0];
-    if (motionDesc.includes("storm")) {
-      const parts = motionDesc.split("...");
-      if (parts.length >= 3) {
-        const dirSpeed =
-          parts[2].split("DEG")[0].trim() +
-          "° at " +
-          parts[2].split("KT")[0].split("DEG")[1].trim() +
-          " kt";
-        details.push({ label: "Storm Motion", value: dirSpeed });
-      }
-    }
-  }
+  // parameters moved to top-level props
+  const params = {
+    maxWindGust: warning.maxWindGust,
+    maxHailSize: warning.maxHailSize,
+    tornadoDetection: warning.tornadoDetection,
+    tornadoDamageThreat: warning.tornadoDamageThreat,
+    thunderstormDamageThreat: warning.thunderstormDamageThreat,
+  };
 
-  if (params.maxWindGust && params.maxWindGust[0]) {
+  if (params.maxWindGust) {
     details.push({
       label: "Maximum Wind Gust",
-      value: params.maxWindGust[0],
-      critical: parseInt(params.maxWindGust[0]) >= 70,
+      value: params.maxWindGust,
+      critical: parseInt(params.maxWindGust) >= 70,
     });
   }
 
-  if (params.maxHailSize && params.maxHailSize[0]) {
+  if (params.maxHailSize) {
+    // Strip units and parse float
+    const hailSizeNum = parseFloat(params.maxHailSize);
     details.push({
       label: "Maximum Hail Size",
-      value: `${params.maxHailSize[0]} inches`,
-      critical: parseFloat(params.maxHailSize[0]) >= 1.5,
+      value: params.maxHailSize,
+      critical: hailSizeNum >= 1.5,
     });
   }
 
-  if (params.tornadoDetection && params.tornadoDetection[0]) {
+  if (params.tornadoDetection) {
     details.push({
       label: "Tornado Detection",
-      value: params.tornadoDetection[0],
-      critical: params.tornadoDetection[0].toLowerCase().includes("observed"),
+      value: params.tornadoDetection,
+      critical: params.tornadoDetection.toLowerCase().includes("observed"),
     });
   }
 
-  if (params.tornadoDamageThreat && params.tornadoDamageThreat[0]) {
+  if (params.tornadoDamageThreat) {
     details.push({
       label: "Tornado Damage Threat",
-      value: params.tornadoDamageThreat[0],
-      critical: params.tornadoDamageThreat[0].toLowerCase() !== "possible",
+      value: params.tornadoDamageThreat,
+      critical: params.tornadoDamageThreat.toLowerCase() !== "possible",
     });
   }
 
-  if (params.thunderstormDamageThreat && params.thunderstormDamageThreat[0]) {
-    const tsThreat = params.thunderstormDamageThreat[0];
+  if (params.thunderstormDamageThreat) {
+    const tsThreat = params.thunderstormDamageThreat.toUpperCase();
     details.push({
       label: "Thunderstorm Damage Threat",
-      value: tsThreat,
+      value: params.thunderstormDamageThreat,
       critical: ["CONSIDERABLE", "DESTRUCTIVE", "CATASTROPHIC"].includes(
-        tsThreat.toUpperCase()
+        tsThreat
       ),
     });
   }
@@ -1139,7 +1615,8 @@ function displayWarningDetails(warning) {
   infoSection.appendChild(infoContainer);
   content.appendChild(infoSection);
 
-  if (warning.properties.description) {
+  // Description and Instruction from new top-level fields
+  if (warning.rawText) {
     const descSection = document.createElement("div");
     descSection.className = "detail-section";
 
@@ -1147,15 +1624,15 @@ function displayWarningDetails(warning) {
     descTitle.textContent = "📝 Description";
     descSection.appendChild(descTitle);
 
-    const descText = document.createElement("div");
+    const descText = document.createElement("pre"); // keep formatting
     descText.className = "description-text";
-    descText.textContent = warning.properties.description;
+    descText.textContent = warning.rawText;
     descSection.appendChild(descText);
 
     content.appendChild(descSection);
   }
 
-  if (warning.properties.instruction) {
+  if (warning.instruction) {
     const instrSection = document.createElement("div");
     instrSection.className = "detail-section instructions";
 
@@ -1165,16 +1642,17 @@ function displayWarningDetails(warning) {
 
     const instrText = document.createElement("div");
     instrText.className = "instruction-text";
-    instrText.textContent = warning.properties.instruction;
+    instrText.textContent = warning.instruction;
     instrSection.appendChild(instrText);
 
     content.appendChild(instrSection);
   }
 
+  // Polygon if present (same as before)
   if (
-    warning.geometry &&
-    warning.geometry.type === "Polygon" &&
-    warning.geometry.coordinates
+    warning.polygon &&
+    Array.isArray(warning.polygon) &&
+    warning.polygon.length > 0
   ) {
     const areaSection = document.createElement("div");
     areaSection.className = "detail-section areas";
@@ -1183,11 +1661,7 @@ function displayWarningDetails(warning) {
     polygonTitle.textContent = "🗺️ Warning Area";
     areaSection.appendChild(polygonTitle);
 
-    const polygonContainer = drawPolygon(
-      warning.geometry.coordinates,
-      content,
-      eventClass
-    );
+    const polygonContainer = drawPolygon(warning.polygon, content, eventClass);
     if (polygonContainer) {
       areaSection.appendChild(polygonContainer);
       content.appendChild(areaSection);
@@ -1288,18 +1762,16 @@ function drawPolygon(coordinates, container) {
 
   const ctx = canvas.getContext("2d");
 
-  const points = coordinates[0];
-  if (!points || !points.length) return null;
-
+  // ✅ Flip [lon, lat] → [lat, lon]
+  const rawPoints = coordinates[0];
+  const points = rawPoints.map(([lon, lat]) => [lat, lon]);
   if (!points || !points.length) return null;
 
   let minLat = 90,
     maxLat = -90,
     minLon = 180,
     maxLon = -180;
-  points.forEach((point) => {
-    const lat = point[0];
-    const lon = point[1];
+  points.forEach(([lat, lon]) => {
     minLat = Math.min(minLat, lat);
     maxLat = Math.max(maxLat, lat);
     minLon = Math.min(minLon, lon);
@@ -1475,19 +1947,19 @@ function getWindEmoji(windSpeed) {
   }
   if (speed >= 70) {
     // NWS Severe Thunderstorm threshold
-    return "<span class='emoji-animated'>⚠️⚠️</span>";
+    return "<span class='emoji-animated'>❗</span>";
   }
   if (speed >= 60) {
     // Strong non-severe winds / advisory level
     return "<span class='emoji-animated'>⚠️</span>";
   }
   // <39 mph: typical breezes
-  return "<span class='emoji-animated'>🟢</span>";
+  return "<span class='emoji-animated'></span>";
 }
 
 function getHailEmoji(hailSize) {
   const size = parseFloat(hailSize);
-  if (isNaN(size)) return "<span class='emoji-animated'>🧊</span>";
+  if (isNaN(size)) return "<span class='emoji-animated'>🟠</span>";
 
   if (size >= 5.0) {
     // Softball
@@ -1530,181 +2002,7 @@ function getHailEmoji(hailSize) {
     return "<span class='emoji-animated'>🟠</span>";
   }
   // Smaller than pea-sized
-  return "<span class='emoji-animated'>🧊</span>";
-}
-
-function displayNotification(warning, notificationType = "") {
-  if (notificationsMuted) {
-    console.log("Notifications are muted. Skipping display.");
-    return;
-  }
-
-  const eventName = getEventName(warning);
-  const messageType = warning.properties?.messageType;
-  const description = warning.properties?.description || "";
-
-  if (messageType !== "Alert" && messageType !== "Update") return;
-
-  if (messageType === "Alert") {
-    notificationType = "NEW WEATHER ALERT:";
-  } else if (messageType === "Update") {
-    notificationType = "ALERT UPDATED:";
-  }
-
-  const notification = document.createElement("div");
-
-  const rawAreaDesc = warning.properties.areaDesc || "";
-  const cleanAreaDesc = rawAreaDesc.replace(/^TEST\s*-\s*/i, "");
-
-  const countiesArray = cleanAreaDesc
-    .split(";")
-    .map((c) => c.trim())
-    .filter(Boolean); // Remove empty strings
-
-  const numberOfCounties = countiesArray.length;
-  console.log("Parsed counties array:", countiesArray);
-  console.log("Count:", numberOfCounties);
-
-  if (numberOfCounties > 20) {
-    notification.style.bottom = "170px";
-  } else if (numberOfCounties > 10) {
-    notification.style.bottom = "120px";
-  } else {
-    notification.style.bottom = "70px";
-  }
-  notification.className = "notification-popup";
-
-  const notificationTypeLabel = document.createElement("div");
-  notificationTypeLabel.className = "notification-type-label";
-  notificationTypeLabel.textContent = notificationType;
-  notification.appendChild(notificationTypeLabel);
-
-  const title = document.createElement("div");
-  title.className = "notification-title";
-  title.textContent = eventName;
-
-  const countiesSection = document.createElement("div");
-  countiesSection.className = "notification-message";
-  countiesSection.textContent = cleanAreaDesc;
-
-  const expirationElement = document.createElement("div");
-  expirationElement.className = "notification-expiration";
-
-  const expirationDate = new Date(warning.properties.expires);
-  const timeOptions = {
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: true,
-  };
-  const formattedExpirationTime = expirationDate.toLocaleString(
-    "en-US",
-    timeOptions
-  );
-  expirationElement.textContent = `EXPIRES: ${formattedExpirationTime}`;
-
-  let notificationDuration = 7000;
-  if (
-    eventName === "Tornado Emergency" ||
-    eventName === "PDS Tornado Warning"
-  ) {
-    notificationDuration = 10000;
-  }
-
-  const logo = document.getElementById("pulseLogo");
-  if (logo) {
-    logo.classList.remove("notification-pulse");
-    void logo.offsetWidth;
-    logo.classList.add("notification-pulse");
-
-    setTimeout(() => {
-      logo.classList.remove("notification-pulse");
-    }, 2000);
-  }
-
-  if (notificationType === "NEW WEATHER ALERT:") {
-    notificationTypeLabel.style.color = "#FFDE59";
-  }
-
-  if (eventName.includes("Tornado Warning")) {
-    const hazardMatch = description.match(/HAZARD\.{3}\s*([^\n\r]*)/i);
-    const sourceMatch = description.match(/SOURCE\.{3}\s*([^\n\r]*)/i);
-    const hazard = hazardMatch ? hazardMatch[1].trim() : "N/A";
-    const source = sourceMatch ? sourceMatch[1].trim() : "N/A";
-
-    const hazardSourceDiv = document.createElement("div");
-    hazardSourceDiv.className = "hazard-source-info";
-    hazardSourceDiv.innerHTML = `
-      <div><strong>HAZARD:</strong> ${hazard}</div>
-      <div><strong>SOURCE:</strong> ${source}</div>
-    `;
-    notification.appendChild(hazardSourceDiv);
-  }
-
-  const emergencyContainer = document.createElement("div");
-  emergencyContainer.className = "emergency-container";
-  emergencyContainer.style.display = "flex";
-  emergencyContainer.style.alignItems = "center";
-  emergencyContainer.style.justifyContent = "flex-end";
-
-  const emergencyAlert = document.createElement("div");
-  emergencyAlert.className = "emergency-alert";
-  emergencyAlert.style.fontSize = "36px";
-  emergencyAlert.style.color = "#fff";
-
-  if (
-    eventName === "Tornado Emergency" ||
-    eventName === "PDS Tornado Warning"
-  ) {
-    emergencyAlert.innerHTML =
-      "THIS IS AN EXTREMELY DANGEROUS SITUATION. TAKE COVER NOW!";
-  } else if (eventName === "Observed Tornado Warning") {
-    emergencyAlert.innerHTML = "A TORNADO IS ON THE GROUND! TAKE COVER NOW!";
-  } else if (eventName === "Severe Thunderstorm Warning (Destructive)") {
-    emergencyAlert.innerHTML = "THESE ARE VERY DANGEROUS STORMS!";
-  }
-
-  if (eventName.includes("Severe Thunderstorm Warning")) {
-    const maxWindGust =
-      warning.properties.parameters?.maxWindGust?.[0] || "N/A";
-    const maxHailSize =
-      warning.properties.parameters?.maxHailSize?.[0] || "N/A";
-
-    const windEmoji = getWindEmoji(maxWindGust);
-    const hailEmoji = getHailEmoji(maxHailSize);
-
-    const windHailDiv = document.createElement("div");
-    windHailDiv.className = "wind-hail-info";
-    windHailDiv.innerHTML = `
-      <div>${windEmoji} Max Wind: ${maxWindGust}</div>
-      <div>${hailEmoji} Max Hail: ${maxHailSize} in</div>
-    `;
-    notification.appendChild(windHailDiv);
-  }
-
-  emergencyContainer.appendChild(emergencyAlert);
-  notification.appendChild(emergencyContainer);
-  notification.appendChild(title);
-  notification.appendChild(countiesSection);
-  notification.appendChild(expirationElement);
-  document.body.appendChild(notification);
-
-  // Animate
-  notification.style.transform = "translateY(100%)";
-  notification.style.backgroundColor = getAlertColor(eventName);
-  notification.style.opacity = 1;
-  notification.style.transition =
-    "transform 0.85s cubic-bezier(0.4, 0, 0.2, 1)";
-
-  setTimeout(() => {
-    notification.style.transform = "translateY(50%)";
-  }, 50);
-
-  setTimeout(() => {
-    notification.style.transform = "translateY(100%)";
-    setTimeout(() => {
-      notification.remove();
-    }, 500);
-  }, notificationDuration);
+  return "<span class='emoji-animated'>🟠</span>";
 }
 
 document
@@ -1773,122 +2071,6 @@ function formatCountiesTopBar(areaDesc) {
   return parts.join(", ");
 }
 
-async function fetchWarnings() {
-  try {
-    const response = await fetch(
-      "https://api.weather.gov/alerts/active?area=MI"
-    );
-    const data = await response.json();
-    const warnings = data.features.filter((feature) =>
-      selectedAlerts.has(feature.properties.event)
-    );
-
-    let tornadoCount = 0;
-    let thunderstormCount = 0;
-    let floodCount = 0;
-    let winterWeatherCount = 0;
-
-    warnings.forEach((warning) => {
-      const eventName = warning.properties.event;
-      if (eventName === "Tornado Warning") {
-        const detectionType =
-          warning.properties.parameters?.tornadoDetection?.[0];
-        const damageThreat =
-          warning.properties.parameters?.tornadoDamageThreat?.[0];
-        if (detectionType === "OBSERVED") {
-          if (damageThreat === "CONSIDERABLE") {
-            tornadoCount++;
-          } else if (damageThreat === "CATASTROPHIC") {
-            tornadoCount++;
-          } else {
-            tornadoCount++;
-          }
-        } else {
-          tornadoCount++;
-        }
-      } else if (eventName === "Severe Thunderstorm Warning") {
-        const damageThreat =
-          warning.properties.parameters?.thunderstormDamageThreat?.[0];
-        if (damageThreat === "CONSIDERABLE") {
-          thunderstormCount++;
-        } else if (damageThreat === "DESTRUCTIVE") {
-          thunderstormCount++;
-        } else {
-          thunderstormCount++;
-        }
-      } else if (eventName === "Flash Flood Warning") {
-        floodCount++;
-      } else if (eventName === "Winter Weather Advisory") {
-        winterWeatherCount++;
-      } else if (eventName === "Winter Storm Warning") {
-        winterWeatherCount++;
-      } else if (eventName === "Winter Storm Watch") {
-        winterWeatherCount++;
-      }
-    });
-
-    tornadoCountElement.textContent = `${labels.tornado}: ${tornadoCount}`;
-    thunderstormCountElement.textContent = `${labels.thunderstorm}: ${thunderstormCount}`;
-    floodCountElement.textContent = `${labels.flood}: ${floodCount}`;
-    winterWeatherCountElement.textContent = `${labels.winter}: ${winterWeatherCount}`;
-
-    warnings.sort(
-      (a, b) => new Date(b.properties.sent) - new Date(a.properties.sent)
-    );
-    activeWarnings = warnings;
-
-    if (warnings.length === 0) {
-      const stationIds = Object.keys(MI_STATIONS);
-      if (
-        stationIds.length > 0 &&
-        currentConditions[stationIds[currentStationIndex]]
-      ) {
-        displayCurrentConditions(stationIds[currentStationIndex]);
-      }
-    } else {
-      updateWarningList();
-    }
-
-    const currentWarningIds = new Set(warnings.map((w) => w.id));
-
-    warnings.forEach((warning) => {
-      const warningId = warning.id;
-      const eventName = getEventName(warning);
-
-      if (!warning.properties || !warning.properties.event) {
-        console.warn("Warning is missing properties:", warning);
-        return;
-      }
-      if (!previousWarningIds.has(warningId)) {
-        previousWarningIds.add(warningId);
-        showNotification(warning);
-      } else {
-        const previousEvent = previousWarnings.get(warningId);
-        if (previousEvent && previousEvent !== eventName) {
-          showNotification(warning);
-        }
-      }
-
-      previousWarnings.set(warningId, eventName);
-    });
-
-    for (const id of Array.from(previousWarningIds)) {
-      if (!currentWarningIds.has(id)) {
-        const prev = previousWarnings.get(id);
-        const name = typeof prev === "string" ? prev : getEventName(prev);
-
-        console.log(`⚠️ Warning expired: ${name} (ID: ${id})`);
-        notifyWarningExpired(name, id);
-
-        previousWarnings.delete(id);
-        previousWarningIds.delete(id);
-      }
-    }
-  } catch (error) {
-    console.error("❌ Error fetching warnings:", error);
-  }
-}
-
 function formatCountiesNotification(areaDesc) {
   if (!areaDesc) return "Unknown Area";
 
@@ -1919,13 +2101,15 @@ function updateWarningList(warnings) {
   warningList.appendChild(listHeader);
 
   const warningGroups = {};
-  warnings.forEach((warning) => {
-    const eventName = warning.properties.event;
-    if (!warningGroups[eventName]) {
-      warningGroups[eventName] = [];
-    }
-    warningGroups[eventName].push(warning);
-  });
+  warnings
+    .filter((w) => w && w.properties && w.properties.event)
+    .forEach((warning) => {
+      const eventName = getEventName(warning) || "Unknown Event";
+      if (!warningGroups[eventName]) {
+        warningGroups[eventName] = [];
+      }
+      warningGroups[eventName].push(warning);
+    });
 
   const severityOrder = [
     "Tornado Emergency",
@@ -2020,10 +2204,20 @@ function updateWarningList(warnings) {
 }
 
 function createWarningCard(warning, index) {
-  const properties = warning.properties;
-  const eventName = properties.event;
-  const counties = formatCountiesNotification(properties.areaDesc);
-  const expires = new Date(properties.expires);
+  // pull properties from either root or nested 'properties' obj
+  const props = warning.properties || warning;
+
+  // eventName may exist at root or inside properties
+  const eventName = warning.eventName || props.event || "Unknown Event";
+
+  // counties can be array at root or string in properties.areaDesc
+  const counties = Array.isArray(warning.counties)
+    ? warning.counties.join(", ")
+    : props.areaDesc || "Unknown Area";
+
+  // expiration date either root or properties
+  const expiresStr = warning.expires || props.expires;
+  const expires = new Date(expiresStr);
 
   const now = new Date();
   const timeRemaining = expires - now;
@@ -2047,7 +2241,7 @@ function createWarningCard(warning, index) {
 
   card.innerHTML = `
     <div class="card-header">
-      <div class="card-emoji">⚠️</div> <!-- Replace with the appropriate emoji for your warning type -->
+      <div class="card-emoji">⚠️</div>
       <div class="card-title">${eventName}</div>
       <div class="card-urgency-indicator"></div>
     </div>
@@ -2069,11 +2263,11 @@ function createWarningCard(warning, index) {
         </div>
       </div>
       ${
-        properties.instruction
+        props.instruction
           ? `
         <div class="card-instruction">
           <div class="instruction-toggle">Safety Instructions <i class="fa fa-chevron-down"></i></div>
-          <div class="instruction-content hidden">${properties.instruction}</div>
+          <div class="instruction-content hidden">${props.instruction}</div>
         </div>
       `
           : ""
@@ -2221,14 +2415,14 @@ document.getElementById("saveStateButton").addEventListener("click", () => {
 });
 
 document.getElementById("tacticalModeButton").addEventListener("click", () => {
+  initAlertStream();
   console.log("Save button clicked. Starting to listen for alerts...");
-  startListeningForAlerts();
 });
 
 // Event listener for saveStateButton
 document.getElementById("saveStateButton").addEventListener("click", () => {
+  initAlertStream();
   console.log("Save state button clicked. Starting to listen for alerts...");
-  startListeningForAlerts();
 });
 
 let dashboardUpdatePending = false;
@@ -2295,270 +2489,277 @@ let alertCycleInterval; // To hold the interval ID
 
 let alertListeningActive = false; // Flag to track if alert listening is active
 
-function startListeningForAlerts() {
-  if (alertListeningActive) return; // Prevent multiple listeners
+// Helper: parse VTEC into key components
+function parseVTEC(vtec) {
+  // format: /O.ACTION.WFO.PHEN.SIG.ETN.YYYYMMDDThhmmZ-.../
+  const parts = vtec.replace(/^\//, "").replace(/\/$/, "").split(".");
+  if (parts.length < 6) return {};
+  const [preamble, action, wfo, phenSig, etn] = [
+    parts[0],
+    parts[1],
+    parts[2],
+    parts[3] + "." + parts[4],
+    parts[5],
+  ];
+  return { action, wfo, phenSig, etn, core: `${wfo}_${etn}` };
+}
 
-  alertListeningActive = true;
-  const source = new EventSource("/api/xmpp-alerts");
-
-  source.onmessage = (event) => {
-    console.log("📥 Raw event data:", event.data);
-
-    source.onerror = (err) => {
-      console.error("❌ SSE connection error:", err);
+function normalizeAlert(alert) {
+  if (!alert.properties) {
+    alert.properties = {
+      event: alert.eventName || alert.eventCode || "Unknown Event",
+      areaDesc: alert.counties?.join(", ") || "Unknown Area",
+      expires:
+        alert.expires ||
+        alert.expiration ||
+        new Date(Date.now() + 3600000).toISOString(), // fallback 1 hour from now
     };
-
-    let parsed;
-    try {
-      parsed = JSON.parse(event.data);
-    } catch (e) {
-      console.error("❌ SSE JSON parse error:", e, "Raw:", event.data);
-      return;
-    }
-
-    let alertsToProcess = [];
-
-    // 1) Wrapped alert
-    if (parsed.type === "alert" && parsed.data) {
-      alertsToProcess = Array.isArray(parsed.data)
-        ? parsed.data
-        : [parsed.data];
-
-      // 2) Cancellation
-    } else if (parsed.type === "alert-canceled" && parsed.id) {
-      console.log("🚫 Alert canceled:", parsed.id);
-      cancelAlert(parsed.id);
-      return;
-
-      // 3) Already a Feature object
-    } else if (parsed.type === "Feature" && parsed.properties) {
-      alertsToProcess = [parsed];
-
-      // 4) Already an array of features
-    } else if (Array.isArray(parsed) && parsed.length > 0) {
-      alertsToProcess = parsed;
-
-      // 5) Unknown format
-    } else {
-      console.warn("⚠️ Received unknown alert format", parsed);
-      return;
-    }
-
-    // Pass the correctly‑formed array into tacticalMode
-    tacticalMode(alertsToProcess);
-  };
-
-  source.onerror = (err) => {
-    console.error("❌ SSE connection error:", err);
-    alertListeningActive = false; // Reset flag on error
-  };
-}
-
-function tacticalMode(rawAlertsArray, ignoreSameFilter = false) {
-  console.log("🔄 [Start] Processing tactical mode alerts...");
-  console.debug("🛠️ Raw input items:", rawAlertsArray);
-
-  try {
-    if (!Array.isArray(rawAlertsArray) || rawAlertsArray.length === 0) {
-      console.warn("⚠️ No valid alerts data.");
-      return;
-    }
-
-    // 1️⃣ Unwrap SSE wrappers ({type:'alert', data:{…}})
-    const alerts = rawAlertsArray.flatMap((item, i) => {
-      if (!item) {
-        console.warn(`⚠️ Item ${i} is falsy:`, item);
-        return [];
-      }
-      if (item.type === "alert" && item.data) {
-        console.debug(`🔍 Item ${i} is wrapper alert, unwrapping data.`);
-        return Array.isArray(item.data) ? item.data : [item.data];
-      }
-      console.debug(`🔍 Item ${i} is raw alert/feature.`);
-      return [item];
-    });
-    console.info(`ℹ️ Flattened alerts count: ${alerts.length}`);
-
-    // 2️⃣ Filter only ones with .properties
-    const cleanAlerts = alerts.filter((a, i) => {
-      const ok = a && a.properties;
-      if (!ok) console.warn(`⚠️ Alert ${i} missing properties:`, a);
-      return ok;
-    });
-    console.info(`ℹ️ Clean alerts count: ${cleanAlerts.length}`);
-    if (cleanAlerts.length === 0) return;
-
-    // 3️⃣ Prepare global sets/maps
-    if (!window.activeWarningsSet) window.activeWarningsSet = new Set();
-    // don't clear the set here since we are pushing (we'll check duplicates)
-    if (!window.previousWarnings) window.previousWarnings = new Map();
-
-    // 4️⃣ Build map of previous VTEC cores
-    const prevVtecMap = new Map();
-    for (const prev of window.previousWarnings.values()) {
-      const v = prev.properties.VTEC || prev.properties.vtec || "";
-      const core = getVTECCore(v);
-      if (core) prevVtecMap.set(core, prev);
-    }
-
-    // 5️⃣ Update list UI
-    updateWarningList(Array.from(window.previousWarnings.values()));
-
-    // 6️⃣ Iterate and filter
-    const newWarningsToAdd = [];
-    const selectedTypes = Array.from(
-      document.querySelectorAll("#checkboxContainer input:checked")
-    ).map((cb) => cb.value);
-    const selectedStates = Array.isArray(window.selectedStates)
-      ? window.selectedStates
-      : [];
-
-    for (const alert of cleanAlerts) {
-      const id = alert.id || alert.properties.id;
-      const props = alert.properties;
-      const msg = props.messageType || "";
-      const eventName = getEventName(alert);
-      const vtec = props.VTEC || props.vtec || "";
-      const core = getVTECCore(vtec);
-
-      // Cancel/expire
-      if (alert.type === "alert-canceled" || /CAN|EXP/i.test(msg)) {
-        if (window.previousWarnings.has(id)) {
-          window.previousWarnings.delete(id);
-          window.activeWarningsSet.delete(id);
-          broadcastCancel?.(id);
-          notifyWarningExpired(eventName, id);
-          // Also remove from activeWarnings array:
-          activeWarnings = activeWarnings.filter(
-            (w) => (w.id || w.properties.id) !== id
-          );
-        }
-        continue;
-      }
-
-      // Dedupe continued/updated
-      if (/CON|NEW|UPDATE/i.test(msg)) {
-        const prior = prevVtecMap.get(core);
-        if (prior) {
-          const priorSent = new Date(prior.properties.sent);
-          const newSent = new Date(props.sent);
-          if (newSent <= priorSent) continue;
-
-          const priorId =
-            prior.normalizedId ||
-            (prior.id || "").replace(/^(urn:oid:)+/, "urn:oid:");
-          window.previousWarnings.delete(priorId);
-          window.activeWarningsSet.delete(priorId);
-          updateWarningList();
-        }
-      }
-
-      // Expired
-      if (props.expires && new Date(props.expires) <= new Date()) continue;
-
-      // Type filter
-      if (!selectedTypes.includes(eventName)) continue;
-
-      // SAME‑state filter
-      // SAME‑state filter
-      if (!ignoreSameFilter && selectedStates.length > 0) {
-        const alertSAMECodes = alert.properties?.geocode?.SAME || [];
-        const statesFromSAME = alertSAMECodes.map(getStateFromSAME);
-        const matchesInputState = statesFromSAME.some((state) =>
-          selectedStates.includes(state)
-        );
-        if (!matchesInputState) continue; // Skip if no match
-      }
-
-      // Normalize ID
-      const normId = id.replace(/^(urn:oid:)+/, "urn:oid:");
-      alert.normalizedId = normId;
-
-      // Only add if not already active
-      if (!window.activeWarningsSet.has(normId)) {
-        window.activeWarningsSet.add(normId);
-        window.previousWarnings.set(normId, alert);
-        alert.classifiedAs = eventName;
-        newWarningsToAdd.push(alert);
-        prevVtecMap.set(core, alert);
-        showNotification(
-          alert,
-          eventName,
-          /UPDATE/i.test(msg) ? "Update" : "New"
-        );
-      }
-    }
-
-    // 7️⃣ Append new warnings instead of replacing whole array
-    if (!Array.isArray(activeWarnings)) activeWarnings = [];
-    const wasEmpty = activeWarnings.length === 0;
-
-    activeWarnings.push(...newWarningsToAdd);
-
-    // 8️⃣ Fix currentWarningIndex if activeWarnings was empty before
-    if (wasEmpty && activeWarnings.length > 0) {
-      currentWarningIndex = 0;
-    }
-
-    // 9️⃣ Refresh dashboard
-    updateDashboard();
-  } catch (err) {
-    console.error("❌ tacticalMode error:", err);
   }
+  return alert;
 }
 
-function cancelAlert(alertId) {
-  if (!alertId) {
-    console.warn("⚠️ Cancel called without alert ID");
+function TacticalMode(alerts, type = "NEW") {
+  console.log("🔄 [Start] Processing tactical mode alerts...");
+
+  activeWarnings = Array.isArray(activeWarnings) ? activeWarnings : [];
+
+  if (!window.previousWarnings) {
+    window.previousWarnings = new Map();
+  }
+
+  const selectedAlertTypes = Array.from(
+    document.querySelectorAll(
+      '#checkboxContainer input[type="checkbox"]:checked'
+    )
+  ).map((cb) => cb.value);
+
+  alerts.forEach((raw) => {
+    const alert = raw?.feature || raw;
+
+    if (!alert || typeof alert !== "object") {
+      console.warn("⚠️ Skipping non-object alert:", alert);
+      return;
+    }
+
+    const id = alert.id || alert.properties?.id || alert.eventCode || null;
+    const eventName = getEventName(alert);
+
+    if (!id) {
+      console.warn(`⚠️ Skipping alert — missing ID entirely`);
+      return;
+    }
+
+    if (!eventName) {
+      console.warn(`⚠️ Skipping alert [${id}] — missing event name`);
+      return;
+    }
+
+    const hasPolygon = !!(
+      alert.polygon?.type === "Polygon" &&
+      Array.isArray(alert.polygon.coordinates)
+    );
+
+    if (!selectedAlertTypes.includes(eventName)) {
+      console.log(`⛔ Alert type '${eventName}' not selected`);
+      return;
+    }
+
+    const normalized = normalizeAlert(alert);
+
+    if (!window.previousWarnings.has(id)) {
+      console.log(`📝 Adding to previousWarnings: ${eventName} (${id})`);
+      window.previousWarnings.set(id, normalized);
+    }
+
+    const existingIndex = activeWarnings.findIndex((w) => w.id === id);
+    if (existingIndex >= 0) {
+      activeWarnings[existingIndex] = normalized;
+      showNotification(normalized, "UPDATE");
+    } else {
+      activeWarnings.push(normalized);
+      showNotification(normalized, "NEW");
+
+      // 🎯 🆕 NEW: Draw polygon if available
+      if (hasPolygon) {
+        const polygonElem = drawPolygon(
+          alert.polygon.coordinates,
+          document.body
+        ); // Change container if needed
+        if (polygonElem) {
+          document.body.appendChild(polygonElem); // Add to DOM or wherever your alerts live
+        }
+      }
+    }
+  });
+
+  console.log("📦 Active Warnings Summary:");
+  console.table(
+    activeWarnings.map((w) => ({
+      ID: w.id,
+      Event: getEventName(w),
+      Polygon: !!(
+        w.polygon?.type === "Polygon" && Array.isArray(w.polygon.coordinates)
+      ),
+    }))
+  );
+
+  console.log(`✅ [Done] ${activeWarnings.length} active warnings in memory`);
+}
+
+function isWarningExpired(warning) {
+  if (!warning || !warning.properties || !warning.properties.expires) {
+    return false;
+  }
+
+  const expiresDate = new Date(warning.properties.expires);
+  return expiresDate < new Date();
+}
+
+function updateActiveWarningsList() {
+  // Clear the current active warnings
+  activeWarnings = [];
+
+  // Add all non-expired warnings from previousWarnings to activeWarnings
+  if (window.previousWarnings) {
+    window.previousWarnings.forEach((warning, id) => {
+      if (!isWarningExpired(warning)) {
+        activeWarnings.push(warning);
+      } else {
+        console.log(
+          `🕒 Warning ${id} has expired and won't be added to active list`
+        );
+        // Clean up expired warnings
+        window.previousWarnings.delete(id);
+      }
+    });
+  }
+
+  // Update the UI with the current warnings
+  updateWarningList(activeWarnings);
+  updateHighestAlert();
+}
+
+function processNewWarning(warning, action, isUpdate, currentVersion) {
+  // Set default action if not provided
+  const actionType = action ? action.toUpperCase() : "NEW";
+
+  // For INIT alerts, add them to activeWarnings but don't show notifications
+  if (actionType === "INIT") {
+    console.log(`🏁 Adding INIT warning to active list: ${warning.id}`);
+
+    // Make sure activeWarnings exists
+    if (!Array.isArray(activeWarnings)) {
+      activeWarnings = [];
+    }
+
+    // Add to active warnings if not already there
+    if (!activeWarnings.some((w) => w.id === warning.id)) {
+      activeWarnings.push(warning);
+    }
+
+    // Update UI without notifications
+    updateWarningCounters(warning);
+    updateWarningList(activeWarnings);
+    updateHighestAlert();
+    updateDashboard(warning);
     return;
   }
 
-  const normId = alertId.replace(/^(urn:oid:)+/, "urn:oid:");
-
-  // Yank from array
-  if (Array.isArray(activeWarnings)) {
-    activeWarnings = activeWarnings.filter(
-      (w) => (w.id || w.properties?.id || w.normalizedId) !== normId
-    );
+  // For other types, process normally with notifications
+  if (!activeWarnings) {
+    activeWarnings = [];
   }
 
-  // Remove from tracking
-  window.previousWarnings?.delete(normId);
-  window.activeWarningsSet?.delete(normId);
+  // Check if warning already exists in activeWarnings
+  const existingIndex = activeWarnings.findIndex((w) => w.id === warning.id);
+  if (existingIndex >= 0) {
+    // Update existing warning
+    activeWarnings[existingIndex] = warning;
+  } else {
+    // Add new warning
+    activeWarnings.push(warning);
+  }
 
-  // Refresh visuals
-  getHighestActiveAlert?.();
-  updateDashboard?.();
-  updateWarningList?.();
-
-  console.log(`🧹 Alert ${normId} canceled and cleaned up.`);
+  updateWarningCounters(warning);
+  updateWarningList(activeWarnings);
+  updateHighestAlert();
+  showNotification(warning, actionType, isUpdate, currentVersion);
+  updateDashboard(warning);
 }
 
+function getStateFromSAME(sameCode) {
+  if (!sameCode) {
+    console.warn("⚠️ Missing SAME code:", sameCode);
+    return "Unknown";
+  }
+  if (typeof sameCode !== "string") {
+    console.warn("⚠️ Unexpected SAME code type:", sameCode);
+    sameCode = String(sameCode);
+  }
+  if (sameCode.length < 3) {
+    console.warn("⚠️ SAME code too short:", sameCode);
+    return "Unknown";
+  }
+  const fips = sameCode.slice(0, 2); // fix here
+  return STATE_FIPS_TO_ABBR[fips] || "Unknown";
+}
+
+function cancelAlert(id) {
+  if (!id) {
+    console.warn("⚠️ Attempted to cancel alert with no ID");
+    return;
+  }
+
+  console.log(`🗑️ Removing warning: ${id}`);
+
+  // Remove from activeWarnings array
+  activeWarnings = activeWarnings.filter((warning) => warning.id !== id);
+
+  // Clean up from tracking maps
+  if (window.previousWarnings) {
+    window.previousWarnings.delete(id);
+  }
+  if (notifiedWarnings) {
+    notifiedWarnings.delete(id);
+  }
+  if (previousWarningVersions) {
+    previousWarningVersions.delete(id);
+  }
+
+  // Update UI
+  updateWarningList(activeWarnings);
+  updateHighestAlert();
+
+  // If no more warnings, show current conditions
+  if (activeWarnings.length === 0) {
+    showNoWarningDashboard();
+  } else {
+    updateDashboard();
+  }
+
+  console.log(`🧹 Alert ${id} canceled and cleaned up.`);
+}
 let currentCityIndex = 0;
 
 const CITY_STATIONS = [
-  { city: "Detroit", station: "KDTW" },
-  { city: "Lansing", station: "KLAN" },
-  { city: "Grand Rapids", station: "KGRR" },
-  { city: "Kalamazoo", station: "KAZO" },
-  { city: "Hillsdale", station: "KJYM" },
-  { city: "Flint", station: "KFNT" },
-  { city: "Bad Axe", station: "KBAX" },
-  { city: "Mount Pleasant", station: "KMOP" },
-  { city: "Ludington", station: "KLDM" },
-  { city: "Cadillac", station: "KCAD" },
-  { city: "Gaylord", station: "KGLR" },
-  { city: "Houghton", station: "KCMX" },
-  { city: "Marquette", station: "KSAW" },
-  { city: "Sault Ste. Marie", station: "KANJ" },
+  { city: "Indianapolis", station: "KIND" },
+  { city: "Fort Wayne", station: "KFWA" },
+  { city: "South Bend", station: "KSBN" },
+  { city: "Evansville", station: "KEVV" },
+  { city: "Lafayette", station: "KLAF" },
+  { city: "Bloomington", station: "KBMG" },
+  { city: "Terre Haute", station: "KHUF" },
+  { city: "Muncie", station: "KMIE" },
+  { city: "Grissom", station: "KGUS" },
+  { city: "Gary", station: "KGYY" },
 ];
 
 const EXTRA_CITIES = [
-  { city: "Alpena", station: "KAPN" },
-  { city: "Escanaba", station: "KESC" },
-  { city: "Ironwood", station: "KIWD" },
-  { city: "Traverse City", station: "KTVC" },
-  { city: "Saginaw", station: "KHYX" },
+  { city: "Crawfordsville", station: "KCQW" },
+  { city: "Kokomo", station: "KOKK" },
+  { city: "Anderson", station: "KAND" },
+  { city: "Columbus", station: "KBAK" },
+  { city: "Logansport", station: "KOKK" },
 ];
 
 const WEATHER_ICONS = {
@@ -2674,7 +2875,7 @@ function updateWeatherDisplay() {
 }
 
 async function rotateCity() {
-  if (previousWarnings.size > 0) {
+  if (activeWarnings.length > 0) {
     console.log("Active warnings present. Updating warning dashboard.");
     updateDashboard();
     return;
@@ -2691,7 +2892,6 @@ async function rotateCity() {
   }
 
   currentCityIndex = (currentCityIndex + 1) % CITY_STATIONS.length;
-
   const city = CITY_STATIONS[currentCityIndex].city;
   const station = CITY_STATIONS[currentCityIndex].station;
 
@@ -2706,18 +2906,19 @@ async function rotateCity() {
 
   const updatedWeatherData = lastFetchedData.get(city);
   if (updatedWeatherData) {
-    countiesElement.innerHTML = `
-            <img src="${updatedWeatherData.iconUrl}" alt="${
+    // Instead of directly setting innerHTML, use updateCountiesText
+    updateCountiesText(`
+      <img src="${updatedWeatherData.iconUrl}" alt="${
       updatedWeatherData.text
     }" style="width:24px;height:24px;vertical-align:middle;">
-            ${
-              updatedWeatherData.text.charAt(0).toUpperCase() +
-              updatedWeatherData.text.slice(1)
-            }, ${updatedWeatherData.tempF}\u00B0F
-            | Wind: ${updatedWeatherData.cardinalDirection} @ ${
+      ${
+        updatedWeatherData.text.charAt(0).toUpperCase() +
+        updatedWeatherData.text.slice(1)
+      }, ${updatedWeatherData.tempF}\u00B0F
+      | Wind: ${updatedWeatherData.cardinalDirection} @ ${
       updatedWeatherData.windSpeed
     } mph
-        `;
+    `);
   } else {
     console.log("Weather data still not available for city:", city);
   }
@@ -2739,7 +2940,7 @@ function showNoWarningDashboard() {
     noWarningsBar.classList.add("show");
   }
 
-  document.querySelector(".event-type-bar").style.backgroundColor = "#1F2593";
+  document.querySelector(".event-type-bar").style.backgroundColor = "#33333";
 }
 
 function showWarningDashboard() {
@@ -2755,6 +2956,67 @@ function showWarningDashboard() {
     warningBar.classList.add("fade-in");
     warningBar.classList.add("show");
   }
+}
+
+function updateCountiesText(newHTML) {
+  const countiesElement = document.querySelector("#counties");
+
+  // First fade out
+  countiesElement.classList.add("fade-out");
+
+  // After the fade out completes, update HTML and fade back in
+  setTimeout(() => {
+    countiesElement.innerHTML = newHTML; // Changed from textContent to innerHTML
+    countiesElement.classList.remove("fade-out");
+
+    // Only now that counties text has fully faded out, update the event type
+    if (window.pendingEventTypeUpdate) {
+      const { newHTML, newBackgroundColor } = window.pendingEventTypeUpdate;
+      crossfadeEventTypeBar(newHTML, newBackgroundColor);
+      window.pendingEventTypeUpdate = null;
+    }
+  }, 400); // Match this with your CSS transition duration
+}
+
+function crossfadeEventTypeBar(newHTML, newBackgroundColor) {
+  const eventTypeBar = document.querySelector(".event-type-bar");
+
+  // Create a temporary overlay element with the same dimensions and position
+  const overlay = document.createElement("div");
+  overlay.style.position = "absolute";
+  overlay.style.top = "0";
+  overlay.style.left = "0";
+  overlay.style.width = "100%";
+  overlay.style.height = "100%";
+  overlay.style.backgroundColor =
+    newBackgroundColor || eventTypeBar.style.backgroundColor;
+  overlay.style.display = "flex";
+  overlay.style.alignItems = "center";
+  overlay.style.justifyContent = "center";
+  overlay.innerHTML = newHTML;
+  overlay.style.opacity = "0";
+  overlay.style.transition = "opacity 0.4s ease-in-out";
+  overlay.style.zIndex = "1";
+
+  // Make the event type bar a relative container if it's not already
+  if (getComputedStyle(eventTypeBar).position !== "relative") {
+    eventTypeBar.style.position = "relative";
+  }
+
+  // Add the overlay to the event type bar
+  eventTypeBar.appendChild(overlay);
+
+  // Start crossfade
+  setTimeout(() => {
+    overlay.style.opacity = "1";
+
+    // After the crossfade completes, replace the content and remove the overlay
+    setTimeout(() => {
+      eventTypeBar.innerHTML = newHTML;
+      eventTypeBar.style.backgroundColor =
+        newBackgroundColor || eventTypeBar.style.backgroundColor;
+    }, 400);
+  }, 10); // Small delay to ensure the initial opacity is applied
 }
 
 function updateDashboard() {
@@ -2846,8 +3108,10 @@ function updateDashboard() {
   const counties = formatCountiesTopBar(areaDesc);
 
   expirationElement.textContent = `Expires: ${fullFormattedExpirationTime}`;
+  updateCountiesText(
+    `Counties: ${counties} | Until ${formattedExpirationTime}`
+  );
   eventTypeElement.textContent = eventName;
-  countiesElement.textContent = `Counties: ${counties} | Until ${formattedExpirationTime}`;
   activeAlertsBox.style.display = "block";
   activeAlertText.textContent = "ACTIVE ALERTS";
 

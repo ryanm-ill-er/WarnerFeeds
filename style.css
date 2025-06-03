@@ -53,12 +53,14 @@ body {
   height: 50px;
   padding: 5px;
   animation: fadeInOut 2s infinite;
+  flex-shrink: 0; /* keep icon size fixed */
 }
 
 .emergency-icon img {
   width: 100%;
   height: auto;
 }
+
 
 .warning-detail-modal {
   display: none;
@@ -79,7 +81,7 @@ body {
   padding: 20px;
   width: 90%;
   max-width: 700px;
-  max-height: 80vh;
+  max-height: 90vh;
   overflow-y: auto;
   border-radius: 15px;
   color: white;
@@ -325,13 +327,13 @@ body.overlay {
 
 .logo-container {
   position: fixed;
-  bottom: -80px;
-  left: -80px;
+  bottom: -60px;
+  left: -20px;
   z-index: 1020;
 }
 
 .logo {
-    width: 550px; /* Adjust size as needed */
+    width: 420px; /* Adjust size as needed */
     height: auto;
     transform-origin: center;
 }
@@ -487,6 +489,16 @@ body {
   display: inline-block;
 }
 
+.crossfade {
+  opacity: 0;
+  transition: opacity 0.4s ease-in-out;
+}
+
+.crossfade.show {
+  opacity: 1;
+}
+
+
 @keyframes fadeInOut {
   0% {
     opacity: 0;
@@ -570,13 +582,39 @@ body {
   text-shadow: 2px 2px 6px rgba(0, 0, 0, 0.8);
   text-align: left;
   padding: 5px 10px;
-  transition: color 0.3s ease;
+  transition: opacity 0.4s ease-in-out;
+  opacity: 1;
   z-index: -2;
-  bottom: -18px;
+  bottom: -19px;
   white-space: nowrap;
   display: inline-block;
   left: 150px;
 }
+
+.counties-bar.fade-out {
+  opacity: 0;
+}
+
+
+#counties.fade {
+  transition: opacity 0.4s ease-in-out;
+  opacity: 1;
+}
+
+#counties.fade-out {
+  opacity: 0;
+}
+
+
+.counties-bar.fade {
+  transition: opacity 0.4s ease;
+  opacity: 1;
+}
+
+.counties-bar.fading-out {
+  opacity: 0;
+}
+
 
 @keyframes subtleShake {
   0%,
@@ -736,11 +774,11 @@ body {
 
 /* Warning List Styles - Enhanced */
 .warning-list {
-  display: flex;
+  width: auto;
+  height: auto;
   flex-direction: column;
   gap: 0.5rem;
   padding: 0.5rem;
-  max-height: 600px;
   overflow-y: auto;
   background-color: rgba(20, 20, 25, 0.95);
   border-radius: 16px;
@@ -1003,8 +1041,6 @@ body {
 }
 
 .warnings-container {
-  max-height: 1000px;
-  overflow: hidden;
   padding: 0.4rem;
   display: flex;
   flex-direction: column;
@@ -1019,7 +1055,6 @@ body {
   box-shadow: 0 3px 8px rgba(0, 0, 0, 0.3);
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   border: 1px solid rgba(255, 255, 255, 0.05);
-  overflow: hidden;
   position: relative;
 }
 
@@ -1103,7 +1138,7 @@ body {
 }
 
 .card-body {
-  padding: 0.5rem 0.7rem;
+  height: auto;
   display: flex;
   flex-direction: column;
   gap: 0.4rem;
@@ -2045,6 +2080,19 @@ button:hover {
   border-radius: 3px;
 }
 
+.emergency-text {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 0.85em;
+  font-weight: bold;
+  text-transform: uppercase;
+  color: #fff;
+  text-align: right;
+  pointer-events: none;
+  text-shadow: 0 0 3px rgba(0,0,0,0.7);
+}
+
 .animated-button {
   background-color: #4caf50;
   color: white;
@@ -2083,20 +2131,23 @@ button:hover {
 
 .wind-hail-info {
   position: absolute;
-  top: 90px; /* Adjust based on where the Expires text is */
+  top: 40px; /* Adjust if needed */
   right: 5px;
   text-align: right;
   font-size: 1.6em;
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  flex-direction: column; /* stacked */
+  gap: 1px; /* tighter vertical spacing */
+  width: max-content; /* ensures it grows to fit content */
+  min-width: 250px; /* makes it wider by default */
 }
 
 .wind-hail-info div {
-  padding: 2px 8px;
+  padding: 2px 2px;
   white-space: nowrap;
   text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
 }
+
 
 @keyframes emojiGlowPulse {
   0%, 100% {
@@ -2116,31 +2167,48 @@ button:hover {
 
 .hazard-source-info {
   position: absolute;
-  top: 90px; /* Adjust as needed */
+  top: 40px; /* Adjust as needed */
   right: 10px;
   color: #fff;
-  font-size: 1.3em;
-  line-height: 1.4;
-  padding: 0;
+  font-size: 1.4em; /* a lil bigger for clarity */
+  line-height: 1.3;
+  text-shadow:
+    0 0 8px rgba(0, 0, 0, 0.5);
+  padding: 8px 14px;
   text-align: right;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   user-select: none;
-  text-shadow: 0 0 4px rgba(0,0,0,0.6);
+  border-radius: 10px;
+  backdrop-filter: blur(6px); /* soft frosted glass effect */
+  transition: transform 0.25s ease;
+}
+
+.hazard-source-info:hover {
+  transform: scale(1.05);
 }
 
 .hazard-source-info div {
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: #eee;
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
   transition: color 0.3s ease;
 }
 
 .hazard-source-info strong {
-  color: #ffcc00; /* highlight label */
-  margin-right: 6px;
-  text-shadow: 0 0 6px rgba(255, 204, 0, 0.8);
+  color: #ffcc00; /* gold highlight */
+  text-shadow:
+    0 0 8px rgba(167, 134, 2, 0.9),
+    0 0 12px rgba(141, 113, 0, 0.6);
+  margin-right: 8px;
+  min-width: 75px; /* label width for alignment */
+  text-transform: uppercase;
 }
+
 
 
 .active-alerts-box {
