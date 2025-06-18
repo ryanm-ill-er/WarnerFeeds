@@ -529,7 +529,7 @@ body {
   left: 350px;
   margin-left: 0;
   transition: ease-in-out 0.3s;
-  z-index: -2;
+  z-index: 2;
   bottom: -7px;
   display: inline-block;
 }
@@ -619,6 +619,10 @@ body {
   animation: blinkEmoji 2s infinite steps(1);
 }
 
+
+#counties-left-mask {
+  z-index: 1;
+}
 .counties-bar {
   position: relative;
   font-size: 1.4em;

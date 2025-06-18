@@ -92,6 +92,9 @@
             <button onclick="testNotification('Spotter Confirmed Tornado Warning')">
               Test Spotter Confirmed Tornado Warning
             </button>
+            <button onclick="testNotification('Law Enforcement Confirmed Tornado Warning')">
+              Test Law Enforcement Confirmed Tornado Warning
+            </button>
             <button onclick="testNotification('Observed Tornado Warning')">
               Test Observed Tornado Warning
             </button>
@@ -264,6 +267,10 @@
               Warning</label
             ><br />
             <label
+              ><input type="checkbox" value="Public Confirmed Tornado Warning" checked />Law Enforcement Tornado
+              Warning</label
+            ><br />
+            <label
               ><input
                 type="checkbox"
                 value="Observed Tornado Warning"
@@ -426,7 +433,10 @@
             <span id="ActiveAlertText">Loading...</span>
             <div id="eventType" class="event-type-bar">EVENT TYPE</div>
           </div>
-          <div id="counties" class="counties-bar fade">COUNTIES</div>
+          <div id="counties-container" class="counties-container">
+            <div id="counties" class="counties-bar fade">COUNTIES</div>
+          </div>
+          
           <div id="expiration" class="expiration-bar">Expiration Time</div>
         </div>
         <div class="black-bar"></div>
